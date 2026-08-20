@@ -1,3 +1,12 @@
+# ============================================================
+# Usage:
+#   python3 call_llm.py \
+#     --system-prompt system.txt \
+#     --user-prompt user.txt \
+#     --schema schema.json \
+#     --api_key "YOUR_API_KEY"
+# ============================================================
+
 import argparse
 import csv
 import json
