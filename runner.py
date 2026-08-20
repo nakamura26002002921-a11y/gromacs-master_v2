@@ -1,6 +1,6 @@
 # ============================================================
 # Usage:
-#   python3 run.py --cmd "XXX" --path "YYY" -o "ZZZ"
+#   python3 runner.py --cmd "XXX" --path "YYY" -o "ZZZ"
 # ============================================================
 import argparse, subprocess
 
