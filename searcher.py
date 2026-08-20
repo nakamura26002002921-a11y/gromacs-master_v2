@@ -1,6 +1,6 @@
 # ============================================================
 # Usage:
-#   python3 search.py --word "XXXX" --max-results 1 --max-chars 3000 --timeout 10 --unicode-start 0x0400 --unicode-end 0x04FF
+#   python3 searcher.py --word "XXXX" --max-results 1 --max-chars 3000 --timeout 10 --unicode-start 0x0400 --unicode-end 0x04FF
 # ============================================================
 
 import argparse
