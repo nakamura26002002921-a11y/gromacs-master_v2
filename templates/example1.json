@@ -30,19 +30,19 @@
   },
 
   "system_build_solvate": {
-    "実行コマンド": "{GMX} solvate -cp {PATH}/sys/newbox.gro -cs {WATERBOXFILE} -o {PATH}/sys/solv.gro -p {PATH}/sys/solv.top",
-    "目的": "水ボックスを追加して系を溶媒和する",
+    "実行コマンド": "{GMX} solvate -cp {PATH}/sys/newbox.gro -cs {WATERBOXFILE} -o {PATH}/sys/solv.gro -p {PATH}/sys/processed.top",
+    "目的": "水ボックスを追加して系を溶媒和し、既存のトポロジーファイルに水分子数を反映する",
     "次のノード": "create_ions_mdp"
   },
-
+  
   "create_ions_mdp": {
     "実行コマンド": "cat > {PATH}/mdp/ions.mdp <<'EOF'\n; ions.mdp - used as input into grompp to generate ions.tpr\n; Parameters describing what to do, when to stop and what to save\nintegrator  = steep         ; Algorithm (steep = steepest descent minimization)\nemtol       = 1000.0        ; Stop minimization when the maximum force < 1000.0 kJ/mol/nm\nemstep      = 0.01          ; Minimization step size\nnsteps      = 50000         ; Maximum number of (minimization) steps to perform\n\n; Parameters describing how to find the neighbors of each atom and how to calculate the interactions\nnstlist         = 1         ; Frequency to update the neighbor list and long range forces\ncutoff-scheme  = Verlet     ; Buffered neighbor searching\nns_type         = grid      ; Method to determine neighbor list (simple, grid)\ncoulombtype     = cutoff    ; Treatment of long range electrostatic interactions\nrcoulomb        = 1.0       ; Short-range electrostatic cut-off\nrvdw            = 1.0       ; Short-range Van der Waals cut-off\npbc             = xyz       ; Periodic Boundary Conditions in all 3 dimensions\nEOF",
     "目的": "イオン追加用のMDPファイルを作成する",
     "次のノード": "system_build_grompp"
   },
-
+  
   "system_build_grompp": {
-    "実行コマンド": "{GMX} grompp -f {PATH}/mdp/ions.mdp -c {PATH}/sys/solv.gro -p {PATH}/sys/solv.top -o {PATH}/sys/ions.tpr -maxwarn 1",
+    "実行コマンド": "{GMX} grompp -f {PATH}/mdp/ions.mdp -c {PATH}/sys/solv.gro -p {PATH}/sys/processed.top -o {PATH}/sys/ions.tpr -maxwarn 1",
     "目的": "イオン追加用の入力ファイルを生成する",
     "次のノード": "system_build_genion"
   },
