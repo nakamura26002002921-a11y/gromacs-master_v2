@@ -19,37 +19,49 @@
 
   "system_build_pdb2gmx": {
     "実行コマンド": "{GMX} pdb2gmx -f {PATH}/sys/clean.pdb -o {PATH}/sys/processed.gro -water {WATER_MODEL} -p {PATH}/sys/processed.top -ff {FORCE_FIELD}",
-    "目的": "PDBをGROMACS形式へ変換しトポロジーを作成する",
+    "目的": "PDBをGROMACS形式へ変換し、初期トポロジーprocessed.topを作成する",
     "次のノード": "system_build_editconf"
   },
 
   "system_build_editconf": {
     "実行コマンド": "{GMX} editconf -f {PATH}/sys/processed.gro -o {PATH}/sys/newbox.gro -c -d {DISTANCE} -bt cubic",
     "目的": "シミュレーションボックスを作成する",
+    "次のノード": "system_build_copy_sol_top"
+  },
+
+  "system_build_copy_sol_top": {
+    "実行コマンド": "cp {PATH}/sys/processed.top {PATH}/sys/solv.top",
+    "目的": "pdb2gmxで作成したトポロジーを溶媒和用トポロジーsolv.topとしてコピーする",
     "次のノード": "system_build_solvate"
   },
 
   "system_build_solvate": {
-    "実行コマンド": "{GMX} solvate -cp {PATH}/sys/newbox.gro -cs {WATERBOXFILE} -o {PATH}/sys/solv.gro -p {PATH}/sys/processed.top",
-    "目的": "水ボックスを追加して系を溶媒和し、既存のトポロジーファイルに水分子数を反映する",
+    "実行コマンド": "{GMX} solvate -cp {PATH}/sys/newbox.gro -cs {WATERBOXFILE} -o {PATH}/sys/solv.gro -p {PATH}/sys/solv.top",
+    "目的": "水ボックスを追加して系を溶媒和し、solv.topに追加された水分子数を反映する",
     "次のノード": "create_ions_mdp"
   },
-  
+
   "create_ions_mdp": {
     "実行コマンド": "cat > {PATH}/mdp/ions.mdp <<'EOF'\n; ions.mdp - used as input into grompp to generate ions.tpr\n; Parameters describing what to do, when to stop and what to save\nintegrator  = steep         ; Algorithm (steep = steepest descent minimization)\nemtol       = 1000.0        ; Stop minimization when the maximum force < 1000.0 kJ/mol/nm\nemstep      = 0.01          ; Minimization step size\nnsteps      = 50000         ; Maximum number of (minimization) steps to perform\n\n; Parameters describing how to find the neighbors of each atom and how to calculate the interactions\nnstlist         = 1         ; Frequency to update the neighbor list and long range forces\ncutoff-scheme  = Verlet     ; Buffered neighbor searching\nns_type         = grid      ; Method to determine neighbor list (simple, grid)\ncoulombtype     = cutoff    ; Treatment of long range electrostatic interactions\nrcoulomb        = 1.0       ; Short-range electrostatic cut-off\nrvdw            = 1.0       ; Short-range Van der Waals cut-off\npbc             = xyz       ; Periodic Boundary Conditions in all 3 dimensions\nEOF",
     "目的": "イオン追加用のMDPファイルを作成する",
     "次のノード": "system_build_grompp"
   },
-  
+
   "system_build_grompp": {
-    "実行コマンド": "{GMX} grompp -f {PATH}/mdp/ions.mdp -c {PATH}/sys/solv.gro -p {PATH}/sys/processed.top -o {PATH}/sys/ions.tpr -maxwarn 1",
-    "目的": "イオン追加用の入力ファイルを生成する",
+    "実行コマンド": "{GMX} grompp -f {PATH}/mdp/ions.mdp -c {PATH}/sys/solv.gro -p {PATH}/sys/solv.top -o {PATH}/sys/ions.tpr -maxwarn 1",
+    "目的": "溶媒和済みの構造とトポロジーからイオン追加用のTPR入力ファイルを生成する",
+    "次のノード": "system_build_copy_ions_top"
+  },
+
+  "system_build_copy_ions_top": {
+    "実行コマンド": "cp {PATH}/sys/solv.top {PATH}/sys/ions.top",
+    "目的": "溶媒和後のトポロジーをイオン追加用トポロジーions.topとしてコピーする",
     "次のノード": "system_build_genion"
   },
 
   "system_build_genion": {
     "実行コマンド": "printf 'SOL\\n' | {GMX} genion -s {PATH}/sys/ions.tpr -o {PATH}/sys/ions.gro -p {PATH}/sys/ions.top -pname NA -nname CL -neutral",
-    "目的": "系を電気的に中性化するためにイオンを追加する",
+    "目的": "系を電気的に中性化するためにイオンを追加し、ions.topに追加されたイオン数を反映する",
     "次のノード": "system_build_copy"
   },
 
@@ -60,7 +72,7 @@
   },
 
   "create_em_mdp": {
-    "実行コマンド": "cat > {PATH}/mdp/em.mdp <<'EOF'\n; em.mdp - used as input into grompp to generate em.tpr\n; Parameters describing what to do, when to stop and what to save\nintegrator  = steep         ; Algorithm (steep = steepest descent minimization)\nemtol       = 1000.0        ; Stop minimization when the maximum force < 1000.0 kJ/mol/nm\nemstep      = 0.01          ; Minimization step size\nnsteps      = 50000         ; Maximum number of (minimization) steps to perform\n\n; Parameters describing how to find the neighbors of each atom and how to calculate the interactions\nnstlist         = 1         ; Frequency to update the neighbor list and long range forces\ncutoff-scheme   = Verlet    ; Buffered neighbor searching\nns_type         = grid      ; Method to determine neighbor list (simple, grid)\ncoulombtype     = PME       ; Treatment of long range electrostatic interactions\nrcoulomb        = 1.0       ; Short-range electrostatic cut-off\nrvdw            = 1.0       ; Short-range Van der Waals cut-off\npbc             = xyz       ; Periodic Boundary Conditions in all 3 dimensions\nEOF",
+    "実行コマンド": "cat > {PATH}/mdp/em.mdp <<'EOF'\n; em.mdp - used as input to grompp to generate em.tpr\nintegrator  = steep\nemtol       = 1000.0\nemstep      = 0.01\nnsteps      = 50000\n\nnstlist         = 1\ncutoff-scheme   = Verlet\nns_type         = grid\ncoulombtype     = PME\nrcoulomb        = 1.0\nrvdw            = 1.0\npbc             = xyz\nEOF",
     "目的": "エネルギー最小化用のMDPファイルを作成する",
     "次のノード": "minimization"
   },
@@ -124,7 +136,7 @@
     "目的": "MD軌道を整形し、PDBとSASAおよび体積データを生成する",
     "次のノード": "finish"
   },
-  
+
   "finish": {
     "実行コマンド": "echo finish",
     "目的": "シミュレーションと解析の完了を記録する",
