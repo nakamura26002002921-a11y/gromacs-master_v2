@@ -15,7 +15,7 @@
     "実行コマンド": "grep -vE '^.{17}SOL ' {PATH}/sys/{PDBID}.pdb > {PATH}/sys/clean.pdb",
     "目的": "PDBから水分子SOLを除去してclean.pdbを作成する",
     "次のノード": "system_build_pdb2gmx"
-  }
+  },
 
   "system_build_pdb2gmx": {
     "実行コマンド": "{GMX} pdb2gmx -f {PATH}/sys/clean.pdb -o {PATH}/sys/processed.gro -water {WATER_MODEL} -p {PATH}/sys/processed.top -ff {FORCE_FIELD}",
@@ -123,7 +123,7 @@
     "実行コマンド": "cd {PATH}/md && echo 0 | {GMX} trjconv -f md.xtc -s md.tpr -o md_w.xtc -pbc whole && printf '1\\n0\\n' | {GMX} trjconv -f md_w.xtc -s md.tpr -o md_w_cluster.xtc -pbc cluster && printf '1\\n0\\n' | {GMX} trjconv -f md_w_cluster.xtc -s md.tpr -o md_w_cluster_center.xtc -pbc mol -ur compact -center && {GMX} editconf -f md.gro -o md.pdb && printf '1\\n' | {GMX} sasa -f md_w_cluster_center.xtc -s md.tpr -o sasa.xvg -tv volume.xvg",
     "目的": "MD軌道を整形し、PDBとSASAおよび体積データを生成する",
     "次のノード": "finish"
-  }
+  },
   
   "finish": {
     "実行コマンド": "echo finish",
