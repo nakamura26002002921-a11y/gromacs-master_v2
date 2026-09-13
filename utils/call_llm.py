@@ -1,60 +1,58 @@
+# call_llm.py
 # ============================================================
 # Usage:
-#   python3 call_llm.py \
-#     --system-prompt system.txt \
-#     --user-prompt user.txt \
-#     --schema schema.json \
-#     --api_key "YOUR_API_KEY"
+#   python3 call_llm.py -k API_KEY -e "エラー内容"
 # ============================================================
-
 import argparse
-import csv
 import json
-import subprocess
-import sys
-import time
 from groq import Groq
 
+SYSTEM_PROMPT = """
+目的：
+エラーを解消する。
 
-def main(system_prompt, user_prompt, schema, api_key):
+- 実行コマンド: コマンド
+- 目的: なぜそのコマンドを実行するかという理由
+
+json形式で出力する。
+pythonを実行する場合はpython3 コード << EOFの形で実行すること
+利用可能モジュールはnumpy、biopython
+"""
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "実行コマンド": {"type": "string"},
+        "目的": {"type": "string"}
+    },
+    "required": ["実行コマンド", "目的"],
+    "additionalProperties": False
+}
+
+
+def call_llm(error, api_key):
     client = Groq(api_key=api_key)
     response = client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"エラー内容:{error}"}
         ],
         temperature=0,
-        max_tokens=2000,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "graph",
-                "strict": True,
-                "schema": schema
-            }
-        }
-    )
-    usage = response.usage
-    print(
-        f"  tokens: "
-        f"prompt={usage.prompt_tokens}, "
-        f"completion={usage.completion_tokens}, "
-        f"total={usage.total_tokens}"
+        max_tokens=500,
+        response_format={"type": "json_schema", "json_schema": {"name": "gmx_agent", "strict": True, "schema": SCHEMA}}
     )
     return json.loads(response.choices[0].message.content)
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--system-prompt", required=True)
-    parser.add_argument("--user-prompt", required=True)
-    parser.add_argument("--schema", required=True)
-    parser.add_argument("--api_key", required=True)
+    parser.add_argument("-k", "--api_key", required=True)
+    parser.add_argument("-e", "--error", required=True)
     args = parser.parse_args()
-  
-    system_prompt = open(args.system_prompt, encoding="utf-8").read()
-    user_prompt = open(args.user_prompt, encoding="utf-8").read()
-    schema = json.load(open(args.schema, encoding="utf-8"))
 
-    main(system_prompt, user_prompt, schema, args.api_key)
+    print(call_llm(args.error, args.api_key))
+
+
+if __name__ == "__main__":
+    main()
