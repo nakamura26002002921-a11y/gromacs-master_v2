@@ -20,7 +20,6 @@ from urllib.parse import urljoin
 
 def recovery(node, result, plan, history, execution_path, recovery_url, recovery_id):
     print(f"[ERROR] {node}\n{result['エラー']}")
-    
     request_data = {
         "id": recovery_id,
         "ノード": node,
