@@ -19,7 +19,10 @@ from datetime import datetime
 def get_cmd(history, url, api_key):
     json.dump(history, open("recovery_request.json", "w", encoding="utf-8"), ensure_ascii=False)
     subprocess.run(f"wget -q -O recovery_result.json --post-file=recovery_request.json --header='Content-Type: application/json' --header='X-API-Key: {api_key}' '{url}'", shell=True)
-    data = json.load(open("recovery_result.json", encoding="utf-8"))
+    result_path = Path("recovery_result.json")
+    if not result_path.exists() or result_path.stat().st_size == 0:
+        return None
+    data = json.load(open(result_path, encoding="utf-8"))
     return data[0] if isinstance(data, list) else data
 
 
@@ -32,9 +35,8 @@ def main():
     p.add_argument("-e", "--end")
     p.add_argument("-ep", "--executionpath")
     p.add_argument("--recovery-url", default="")
-    p.add_argument("--api-key", default="")
+    p.add_argument("--api-key", required=True)
     a = p.parse_args()
-
     plan_path = Path(a.plan)
     plan = json.load(open(plan_path, encoding="utf-8"))
     name = plan_path.stem
@@ -48,29 +50,31 @@ def main():
     node = a.start or nodes[0]
     end = a.end or nodes[-1]
     history = []
-
     try:
         while True:
             n = plan[node]
-            r = subprocess.run(n["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
-            result = {"ノード": node, "実行コマンド": n["実行コマンド"], "目的": n["目的"], "出力": r.stdout, "エラー": r.stderr, "終了コード": r.returncode}
+            try:
+                r = subprocess.run(n["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
+                result = {"ノード": node, "実行コマンド": n["実行コマンド"], "目的": n["目的"], "出力": r.stdout, "エラー": r.stderr, "終了コード": r.returncode}
+            except KeyboardInterrupt:
+                result = {"ノード": node, "実行コマンド": n["実行コマンド"], "目的": n["目的"], "出力": "", "エラー": "KeyboardInterrupt (^C)", "終了コード": -2}
+                history.append(result)
+                raise
             history.append(result)
-
-            if r.returncode != 0:
+            if r.returncode != 0 and a.recovery_url:
                 while True:
                     cmd = get_cmd(history, a.recovery_url, a.api_key)
-                    if cmd:
+                    if cmd is not None and "実行コマンド" in cmd:
                         cmd_r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
-                        result = {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": cmd_r.stdout, "エラー": cmd_r.stderr, "終了コード": cmd_r.returncode}
-                        history.append(result)
-                        node = cmd["次のノード"]
+                        recovery_result = {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": cmd_r.stdout, "エラー": cmd_r.stderr, "終了コード": cmd_r.returncode}
+                        history.append(recovery_result)
                         break
                     time.sleep(30)
+                if recovery_result["終了コード"] != 0:
+                    break
                 continue
-
-            if node == end:
+            if r.returncode != 0 or node == end:
                 break
-
             node = n["次のノード"]
     finally:
         json.dump(history, open(history_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
