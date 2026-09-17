@@ -1,11 +1,6 @@
 # dynamic_orchestrater.py
 # ============================================================
 # Usage:
-#   python3 dynamic_orchestrater.py -p plan.json --recovery-url https://... --test-env /tmp/recovery_env
-#   python3 dynamic_orchestrater.py -p plan.json -s nvt -e npt_pr
-#   python3 dynamic_orchestrater.py -p plan.json -ep /path/to/workdir --test-env ./child_env
-#   python3 dynamic_orchestrater.py -p plan.json --history histories/test.json -l logs/test.json
-#   python3 dynamic_orchestrater.py -p plan.json --depth 5 --branch 5 --population 4 --max-recoveries 10
 # ============================================================
 
 import argparse
@@ -13,6 +8,12 @@ import json
 import subprocess
 from pathlib import Path
 from datetime import datetime
+
+def get_cmd(history, url):
+    json.dump(history, open("recovery_request.json", "w", encoding="utf-8"), ensure_ascii=False)
+    subprocess.run(f"wget -q -O recovery_result.json --post-file=recovery_request.json --header='Content-Type: application/json' '{url}'", shell=True)
+    data = json.load(open("recovery_result.json", encoding="utf-8"))
+    return data[0] if isinstance(data, list) else data
 
 def main():
     p = argparse.ArgumentParser()
@@ -50,17 +51,14 @@ def main():
                 raise
             history.append(result)
             if r.returncode != 0:
-                recovery_state = r.returncode
-                cmd = get_cmd(node, history, result, a.recovery-url)
-                r = subprocess.run(cmd, shell=True, cwd=execution_path, capture_output=True, text=True)
-                result = {"ノード": node, "実行コマンド": n["実行コマンド"], "目的": n["目的"], "出力": r.stdout, "エラー": r.stderr, "終了コード": r.returncode}
-                history.append(result)
-                r = subprocess.run(n["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
-                result = {"ノード": node, "実行コマンド": n["実行コマンド"], "目的": n["目的"], "出力": r.stdout, "エラー": r.stderr, "終了コード": r.returncode}
+                cmd = get_cmd(history, a.recovery_url)
+                cmd_r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
+                result = {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": cmd_r.stdout, "エラー": cmd_r.stderr, "終了コード": cmd_r.returncode}
                 history.append(result)
             if node == end:
                 break
-            node = n["次のノード"]
+            if r.returncode == 0:
+                node = n["次のノード"]
     finally:
         json.dump(history, open(history_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         json.dump(history, open(log_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
