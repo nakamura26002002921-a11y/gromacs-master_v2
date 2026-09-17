@@ -3,6 +3,13 @@
 # Usage:
 #   export RECOVERY_API_KEY="$(openssl rand -hex 32)"
 #   python3 recovery_server.py
+# 別ターミナル:
+#   cloudflared tunnel --url http://127.0.0.1:5000
+# さらに別ターミナル:
+#   curl -X POST https://ant-status-matched-settled.trycloudflare.com/ \
+#      -H "Content-Type: application/json" \
+#      -H "X-API-Key: XXXXYYYYZZZZ123456789" \
+#      -d '[{"ノード": "web-server-01"}]'
 # ============================================================
 
 import os
