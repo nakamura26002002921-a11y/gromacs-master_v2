@@ -17,14 +17,12 @@ from datetime import datetime
 
 
 def get_cmd(history, url, api_key):
-    json.dump(history, open("recovery_request.json", "w", encoding="utf-8"), ensure_ascii=False)
-    subprocess.run(f"wget -q -O recovery_result.json --post-file=recovery_request.json --header='Content-Type: application/json' --header='X-API-Key: {api_key}' '{url}'", shell=True)
-    result_path = Path("recovery_result.json")
-    if not result_path.exists() or result_path.stat().st_size == 0:
+    request_data = json.dumps(history, ensure_ascii=False)
+    result = subprocess.run(["curl", "-sS", "-X", "POST", url, "-H", "Content-Type: application/json", "-H", "X-API-Key: " + api_key, "--data-binary", request_data], capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout:
         return None
-    data = json.load(open(result_path, encoding="utf-8"))
-    return data[0] if isinstance(data, list) else data
-
+    data = json.loads(result.stdout)
+    return data[0] if isinstance(data, list) and data else data
 
 def main():
     p = argparse.ArgumentParser()
