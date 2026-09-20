@@ -17,7 +17,6 @@ GROMACS の分子動力学シミュレーションを、JSON で定義した**�
 | `dynamic_orchestrater.py` | 失敗時に復旧サーバーへ問い合わせ、承認されたら復旧コマンドを実行して再試行する |
 | `recovery_server.py` | 復旧コマンドの承認要求を受け付ける Flask サーバー |
 | `templates/example1.json` | タンパク質系の平衡化から本番MD・解析までのテンプレート |
-| `utils/call_llm.py` | エラーから復旧コマンドを LLM に提案させるスクリプト(現在は復旧サーバーと未連携) |
 
 承認画面(PWA)は別リポジトリ [recovery_approval-v1](https://github.com/nakamura26002002921-a11y/recovery_approval-v1) にあります。
 
