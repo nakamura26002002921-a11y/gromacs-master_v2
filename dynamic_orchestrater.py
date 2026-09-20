@@ -1,11 +1,11 @@
 # dynamic_orchestrater.py
 # ============================================================
 # Usage:
-#   python3 dynamic_orchestrater.py -p plan.json
-#   python3 dynamic_orchestrater.py -p plan.json -s nvt -e npt_pr
-#   python3 dynamic_orchestrater.py -p plan.json -ep /path/to/workdir
-#   python3 dynamic_orchestrater.py -p plan.json --history histories/test.json -l logs/test.json
-#   python3 dynamic_orchestrater.py -p plan.json --recovery-url https://example.com/recovery --api-key YOUR_API_KEY
+#   python3 dynamic_orchestrater.py -p plan.json --api-key YOUR_API_KEY --recovery-url https://example.com
+#   python3 dynamic_orchestrater.py -p plan.json -s nvt -e npt_pr --api-key YOUR_API_KEY --recovery-url https://example.com
+#   python3 dynamic_orchestrater.py -p plan.json -ep /path/to/workdir --api-key YOUR_API_KEY --recovery-url https://example.com
+#   python3 dynamic_orchestrater.py -p plan.json --history histories/test.json -l logs/test.json --api-key YOUR_API_KEY --recovery-url https://example.com
+#   python3 dynamic_orchestrater.py -p plan.json --max-retries 3 --timeout 1800 --api-key YOUR_API_KEY --recovery-url https://example.com
 # ============================================================
 
 import argparse
@@ -32,26 +32,24 @@ def get_approved_cmd(request_id, url, api_key):
     return json.loads(result.stdout)
 
 
-def wait_for_approval(history, url, api_key):
-    while True:
+def wait_for_approval(history, url, api_key, timeout):
+    deadline = time.time() + timeout
+    data = None
+    while data is None or data.get("status") != "pending":
+        if time.time() > deadline:
+            return {"status": "timeout"}
         data = get_cmd(history, url, api_key)
         if data is None:
             time.sleep(5)
-            continue
-        if data.get("status") == "approved":
-            return data
-        if data.get("status") == "rejected":
-            return data
-        if data.get("status") == "pending":
-            request_id = data["request_id"]
-            print("復旧コマンドの承認待ちです。")
-            print("承認ページ: " + data["approval_url"])
-            while True:
-                result = get_approved_cmd(request_id, url, api_key)
-                if result is not None and result.get("status") in ("approved", "rejected"):
-                    return result
-                time.sleep(5)
+    request_id = data["request_id"]
+    print("復旧コマンドの承認待ちです。")
+    print("承認ページ: " + data["approval_url"])
+    while time.time() <= deadline:
+        result = get_approved_cmd(request_id, url, api_key)
+        if result is not None and result.get("status") != "pending":
+            return result
         time.sleep(5)
+    return {"status": "timeout"}
 
 
 def main():
@@ -64,6 +62,8 @@ def main():
     p.add_argument("-ep", "--executionpath")
     p.add_argument("--recovery-url", default="")
     p.add_argument("--api-key", required=True)
+    p.add_argument("--max-retries", type=int, default=3)
+    p.add_argument("--timeout", type=int, default=3600)
     a = p.parse_args()
     plan_path = Path(a.plan)
     plan = json.load(open(plan_path, encoding="utf-8"))
@@ -78,6 +78,7 @@ def main():
     node = a.start or nodes[0]
     end = a.end or nodes[-1]
     history = []
+    retries = 0
     try:
         while True:
             n = plan[node]
@@ -90,8 +91,13 @@ def main():
                 raise
             history.append(result)
             if r.returncode != 0 and a.recovery_url:
-                recovery_result = wait_for_approval(history, a.recovery_url, a.api_key)
+                if retries >= a.max_retries:
+                    print(f"リトライ上限({a.max_retries}回)に達したため停止します。")
+                    break
+                retries += 1
+                recovery_result = wait_for_approval(history, a.recovery_url, a.api_key, a.timeout)
                 if recovery_result["status"] != "approved":
+                    print("復旧コマンドが承認されなかったため停止します: " + recovery_result["status"])
                     break
                 cmd = recovery_result["command"]
                 cmd_r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
@@ -102,6 +108,7 @@ def main():
                 continue
             if r.returncode != 0 or node == end:
                 break
+            retries = 0
             node = n["次のノード"]
     finally:
         json.dump(history, open(history_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
