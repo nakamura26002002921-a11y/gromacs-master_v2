@@ -24,6 +24,36 @@ def get_cmd(history, url, api_key):
     data = json.loads(result.stdout)
     return data[0] if isinstance(data, list) and data else data
 
+
+def get_approved_cmd(request_id, url, api_key):
+    result = subprocess.run(["curl", "-sS", "-X", "GET", url + "/result/" + request_id, "-H", "X-API-Key: " + api_key], capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return json.loads(result.stdout)
+
+
+def wait_for_approval(history, url, api_key):
+    while True:
+        data = get_cmd(history, url, api_key)
+        if data is None:
+            time.sleep(5)
+            continue
+        if data.get("status") == "approved":
+            return data
+        if data.get("status") == "rejected":
+            return data
+        if data.get("status") == "pending":
+            request_id = data["request_id"]
+            print("復旧コマンドの承認待ちです。")
+            print("承認ページ: " + data["approval_url"])
+            while True:
+                result = get_approved_cmd(request_id, url, api_key)
+                if result is not None and result.get("status") in ("approved", "rejected"):
+                    return result
+                time.sleep(5)
+        time.sleep(5)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("-p", "--plan", required=True)
@@ -60,15 +90,14 @@ def main():
                 raise
             history.append(result)
             if r.returncode != 0 and a.recovery_url:
-                while True:
-                    cmd = get_cmd(history, a.recovery_url, a.api_key)
-                    if cmd is not None and "実行コマンド" in cmd:
-                        cmd_r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
-                        recovery_result = {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": cmd_r.stdout, "エラー": cmd_r.stderr, "終了コード": cmd_r.returncode}
-                        history.append(recovery_result)
-                        break
-                    time.sleep(30)
-                if recovery_result["終了コード"] != 0:
+                recovery_result = wait_for_approval(history, a.recovery_url, a.api_key)
+                if recovery_result["status"] != "approved":
+                    break
+                cmd = recovery_result["command"]
+                cmd_r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
+                recovery_execution_result = {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": cmd_r.stdout, "エラー": cmd_r.stderr, "終了コード": cmd_r.returncode}
+                history.append(recovery_execution_result)
+                if recovery_execution_result["終了コード"] != 0:
                     break
                 continue
             if r.returncode != 0 or node == end:
