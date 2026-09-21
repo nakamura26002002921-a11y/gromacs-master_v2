@@ -12,43 +12,82 @@ import argparse
 import json
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from datetime import datetime
 
-
-def get_cmd(history, url, api_key):
-    request_data = json.dumps(history, ensure_ascii=False)
-    result = subprocess.run(["curl", "-sS", "-X", "POST", url, "-H", "Content-Type: application/json", "-H", "X-API-Key: " + api_key, "--data-binary", request_data], capture_output=True, text=True)
-    if result.returncode != 0 or not result.stdout:
-        return None
-    data = json.loads(result.stdout)
-    return data[0] if isinstance(data, list) and data else data
+POLL_INTERVAL = 5
+HTTP_TIMEOUT = 30
+# Cloudflare が Python-urllib の既定 User-Agent を弾くことがあるため明示する
+USER_AGENT = "gromacs-orchestrator/2.0"
 
 
-def get_approved_cmd(request_id, url, api_key):
-    result = subprocess.run(["curl", "-sS", "-X", "GET", url + "/result/" + request_id, "-H", "X-API-Key: " + api_key], capture_output=True, text=True)
-    if result.returncode != 0 or not result.stdout:
-        return None
-    return json.loads(result.stdout)
+def api_request(method, url, api_key, body=None):
+    """復旧サーバーへHTTPリクエストを送る。
+
+    戻り値: (HTTPステータス, JSONのdict) 。
+    通信失敗・タイムアウト・JSONでない応答は (None, None) を返す(例外は投げない)。
+    履歴はリクエストボディで送るため、引数長の上限(約128KB)の影響を受けない。
+    """
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+    headers = {"X-API-Key": api_key, "User-Agent": USER_AGENT, "Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as res:
+            status, raw = res.status, res.read()
+    except urllib.error.HTTPError as e:
+        status, raw = e.code, e.read()
+    except (urllib.error.URLError, OSError) as e:
+        print(f"復旧サーバーに接続できません: {e}")
+        return None, None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        print(f"復旧サーバーの応答がJSONではありません (HTTP {status})")
+        return None, None
+    if isinstance(parsed, list):
+        parsed = parsed[0] if parsed else None
+    if not isinstance(parsed, dict):
+        return None, None
+    return status, parsed
 
 
 def wait_for_approval(history, url, api_key, timeout):
+    """承認要求を作成し、承認・拒否・期限切れ・タイムアウトのいずれかまで待つ。
+
+    戻り値の status: approved / rejected / expired / not_found / timeout / error
+    """
+    url = url.rstrip("/")
     deadline = time.time() + timeout
-    data = None
-    while data is None or data.get("status") != "pending":
+
+    # 1. 承認要求を作成する。認証エラーは再試行しても直らないので即座に打ち切る。
+    request_id = None
+    while request_id is None:
         if time.time() > deadline:
             return {"status": "timeout"}
-        data = get_cmd(history, url, api_key)
-        if data is None:
-            time.sleep(5)
-    request_id = data["request_id"]
-    print("復旧コマンドの承認待ちです。")
-    print("承認ページ: " + data["approval_url"])
+        code, data = api_request("POST", url + "/", api_key, history)
+        if code in (401, 403):
+            print(f"復旧サーバーに認証されませんでした (HTTP {code})。--api-key を確認してください。")
+            return {"status": "error"}
+        if data is not None and code == 200 and data.get("status") == "pending" and data.get("request_id"):
+            request_id = data["request_id"]
+            print("復旧コマンドの承認待ちです。")
+            print("承認ページ: " + data["approval_url"])
+        else:
+            time.sleep(POLL_INTERVAL)
+
+    # 2. 承認結果をポーリングする。
     while time.time() <= deadline:
-        result = get_approved_cmd(request_id, url, api_key)
-        if result is not None and result.get("status") != "pending":
+        code, result = api_request("GET", url + "/result/" + request_id, api_key)
+        if code in (401, 403):
+            print(f"復旧サーバーに認証されませんでした (HTTP {code})。--api-key を確認してください。")
+            return {"status": "error"}
+        if result is not None and result.get("status") not in (None, "pending"):
             return result
-        time.sleep(5)
+        time.sleep(POLL_INTERVAL)
     return {"status": "timeout"}
 
 
