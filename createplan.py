@@ -26,11 +26,17 @@ def main():
             print(f"{param}:", end="")
             value = input().strip()
             if value:
-                text = text.replace(f"{{{param}}}", value)
+                # テンプレートはJSON文字列の中に埋め込まれるため、" や \ などを
+                # エスケープしてから置換する(しないと JSON が壊れる)
+                escaped = json.dumps(value, ensure_ascii=False)[1:-1]
+                text = text.replace(f"{{{param}}}", escaped)
                 break
             print("空です。入力してください。")
 
-    plan = json.loads(text)
+    try:
+        plan = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"plan のJSONが不正です: {e}")
     if args.output:
         output = Path(args.output)
     else:
