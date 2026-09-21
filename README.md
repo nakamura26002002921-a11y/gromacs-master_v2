@@ -24,7 +24,6 @@ GROMACS の分子動力学シミュレーションを、JSON で定義した**�
 
 - Python 3.9 以上
 - GROMACS(`gmx` が実行できること)
-- `curl`(`dynamic_orchestrater.py` が使用)
 - 承認画面をスマホで開く場合は HTTPS 公開の手段(Cloudflare Tunnel など)
 
 ```bash
@@ -84,6 +83,7 @@ python3 static_orchestrater.py -p plans/example.json -ep /path/to/workdir
 export RECOVERY_API_KEY="$(openssl rand -hex 32)"
 export APPROVAL_URL="https://YOUR-USER.github.io/recovery_approval-v1/"
 export APPROVAL_TTL=3600    # 任意。承認の有効期限(秒)
+export PUBLIC_URL="https://xxxx.trycloudflare.com"    # 任意。未設定なら受信したリクエストのURLから自動決定
 python3 recovery_server.py
 cloudflared tunnel --url http://127.0.0.1:5000
 ```
@@ -174,6 +174,8 @@ history と log は同じ内容の JSON 配列です。1 コマンドにつき 1
 
 - **コマンドは `shell=True` で実行されます。** plan と、承認した復旧コマンドは、承認者が全文を読んだ上で実行してください。信頼できない plan は実行しないでください。
 - 現在の `recovery_server.py` が返す復旧コマンドは `echo recovery` の固定値です。動作確認用で、実際の復旧処理は行いません。
+- 承認 URL には `api=`(復旧サーバーの公開 URL)が自動で付与され、承認画面はそこへ接続します。`PUBLIC_URL` を設定した場合はその値が使われます。
+- 履歴はリクエストボディで送信するため、出力が大きくても送信できます(以前の `curl` 引数渡しでは約128KBで失敗していました)。
 - 承認要求はメモリ上に保持されるため、サーバーを再起動すると消えます。
 - `recovery_server.py` は Flask の開発サーバーで動きます。長期運用する場合は gunicorn などを使ってください。
 - 承認 URL にはトークンが含まれます。他人に共有しないでください。
