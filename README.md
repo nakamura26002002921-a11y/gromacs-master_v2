@@ -84,6 +84,7 @@ export RECOVERY_API_KEY="$(openssl rand -hex 32)"
 export APPROVAL_URL="https://YOUR-USER.github.io/recovery_approval-v1/"
 export APPROVAL_TTL=3600    # 任意。承認の有効期限(秒)
 export PUBLIC_URL="https://xxxx.trycloudflare.com"    # 任意。未設定なら受信したリクエストのURLから自動決定
+export CORS_ORIGINS="https://YOUR-USER.github.io"     # 任意。未設定なら APPROVAL_URL のオリジンのみ許可
 python3 recovery_server.py
 cloudflared tunnel --url http://127.0.0.1:5000
 ```
@@ -153,6 +154,18 @@ stateDiagram-v2
 - 復旧コマンドの実行が失敗した
 - `--max-retries` に達した
 
+## 終了コード
+
+`static_orchestrater.py` と `dynamic_orchestrater.py` は、シェルスクリプトや CI から呼び出しても成否が判別できるよう、次の終了コードを返します。
+
+| 終了コード | 意味 |
+|---|---|
+| `0` | 最後のノード(または `-e` で指定したノード)まで成功した |
+| `1` | ノードの失敗、復旧の拒否・期限切れ・タイムアウト、リトライ上限、plan の検証エラーなどで止まった |
+| `130` | `^C` で中断した(history は保存される) |
+
+実行前に plan を検証します。`-s` / `-e` に存在しないノード名を指定した場合、「次のノード」が plan にない場合、`実行コマンド` / `目的` がないノードがある場合は、コマンドを実行せずにエラーで終了します。
+
 ## 出力ファイル
 
 history と log は同じ内容の JSON 配列です。1 コマンドにつき 1 要素で、復旧コマンドも同じ形式で追記されます。
@@ -175,6 +188,9 @@ history と log は同じ内容の JSON 配列です。1 コマンドにつき 1
 - **コマンドは `shell=True` で実行されます。** plan と、承認した復旧コマンドは、承認者が全文を読んだ上で実行してください。信頼できない plan は実行しないでください。
 - 現在の `recovery_server.py` が返す復旧コマンドは `echo recovery` の固定値です。動作確認用で、実際の復旧処理は行いません。
 - 承認 URL には `api=`(復旧サーバーの公開 URL)が自動で付与され、承認画面はそこへ接続します。`PUBLIC_URL` を設定した場合はその値が使われます。
+- 復旧サーバーは、承認画面のオリジン(既定は `APPROVAL_URL` のオリジン、`CORS_ORIGINS` で変更可)からのブラウザアクセスだけを許可します。
+- 復旧サーバーは、空・不正な形式の history を受け取ると HTTP 400 を返します。
+- `createplan.py` は、入力値に `"` や `\` が含まれていても JSON が壊れないようエスケープして埋め込みます。
 - 履歴はリクエストボディで送信するため、出力が大きくても送信できます(以前の `curl` 引数渡しでは約128KBで失敗していました)。
 - 承認要求はメモリ上に保持されるため、サーバーを再起動すると消えます。
 - `recovery_server.py` は Flask の開発サーバーで動きます。長期運用する場合は gunicorn などを使ってください。
