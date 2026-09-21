@@ -10,38 +10,85 @@
 #   3. (任意) 承認の有効期限を秒で設定 (デフォルト 3600)
 #      export APPROVAL_TTL=3600
 #
-#   3'. (任意) 復旧サーバーの公開URLを設定
+#   4. (任意) 承認ページからのアクセスを許可するオリジンをカンマ区切りで設定
+#      未設定の場合は APPROVAL_URL のオリジン(scheme://host)のみ許可する。
+#      export CORS_ORIGINS="https://YOUR-USER.github.io"
+#
+#   5. (任意) 復旧サーバーの公開URLを設定
 #      未設定の場合は、オーケストレーターがアクセスしてきたURL(Host / X-Forwarded-*)から
 #      自動で決定し、承認URLの api= に付与する。
 #      export PUBLIC_URL="https://xxxx.trycloudflare.com"
 #
-#   4. 復旧サーバーを起動
+#   6. 復旧サーバーを起動
 #      python3 recovery_server.py
 #
-#   5. Cloudflare Tunnel等でHTTPS公開
+#   7. Cloudflare Tunnel等でHTTPS公開
 #      cloudflared tunnel --url http://127.0.0.1:5000
 # ============================================================
 
+import hashlib
+import hmac
+import json
 import os
 import secrets
+import sys
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-app = Flask(__name__)
-CORS(app)
 
-API_KEY = os.environ["RECOVERY_API_KEY"]
-APPROVAL_URL = os.environ["APPROVAL_URL"]
-APPROVAL_TTL = int(os.environ.get("APPROVAL_TTL", "3600"))
+def require_env(name):
+    """必須の環境変数を読む。未設定なら分かりやすいメッセージで終了する。"""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        sys.exit(f"環境変数 {name} が設定されていません。ファイル冒頭の Usage を参照してください。")
+    return value
+
+
+API_KEY = require_env("RECOVERY_API_KEY")
+APPROVAL_URL = require_env("APPROVAL_URL")
+try:
+    APPROVAL_TTL = int(os.environ.get("APPROVAL_TTL", "3600"))
+except ValueError:
+    sys.exit("環境変数 APPROVAL_TTL は整数(秒)で指定してください。")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+
+
+def get_cors_origins():
+    """承認ページ(GitHub Pages等)のオリジンだけを許可する。全オリジン開放にはしない。"""
+    configured = [o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+    if configured:
+        return configured
+    parts = urlsplit(APPROVAL_URL)
+    return [f"{parts.scheme}://{parts.netloc}"]
+
+
+app = Flask(__name__)
+CORS(app, origins=get_cors_origins())
 
 pending_requests = {}
 
 
+def safe_equal(a, b):
+    """タイミング攻撃を避けるため、定数時間で文字列を比較する。"""
+    if not isinstance(a, str) or not isinstance(b, str):
+        return False
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 def check_api_key():
-    return request.headers.get("X-API-Key") == API_KEY
+    return safe_equal(request.headers.get("X-API-Key", ""), API_KEY)
+
+
+def command_hash(command):
+    """コマンド内容(実行コマンド+目的)のSHA-256。承認内容と実行内容が同一であることの検証に使う。"""
+    canonical = json.dumps({"実行コマンド": command["実行コマンド"], "目的": command["目的"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---- 承認トークンの総当たり対策: request_id ごとの失敗回数を制限する ----
+MAX_FAILED_TOKENS = 5
 
 
 def is_expired(item):
@@ -58,11 +105,33 @@ def get_public_url():
 
 
 def build_approval_url(request_id, approval_token):
-    """APPROVAL_URL に既存のクエリがあっても壊れないように request_id / token / api を付与する。"""
+    """承認URLを組み立てる。
+
+    request_id / api はクエリに、承認トークンはフラグメント(#)に入れる。
+    フラグメントはブラウザからサーバー(GitHub Pages等)へ送信されず、Refererにも載らないため、
+    トークンがアクセスログ等に残らない。
+    APPROVAL_URL に既存のクエリがあっても壊れない。
+    """
     parts = urlsplit(APPROVAL_URL)
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in ("request_id", "token", "api")]
-    query += [("request_id", request_id), ("token", approval_token), ("api", get_public_url())]
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    query += [("request_id", request_id), ("api", get_public_url())]
+    fragment = urlencode({"token": approval_token})
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), fragment))
+
+
+def validate_history(history):
+    """履歴が「ノード・実行コマンド等を持つdictの空でないリスト」であることを確認する。
+
+    問題があればエラーメッセージ、なければ None を返す。
+    """
+    if not isinstance(history, list) or not history:
+        return "history は空でない配列で送ってください"
+    for i, entry in enumerate(history):
+        if not isinstance(entry, dict):
+            return f"history[{i}] はオブジェクトである必要があります"
+    if not isinstance(history[-1].get("ノード"), str):
+        return "history の最後の要素に文字列の「ノード」が必要です"
+    return None
 
 
 def get_cmd(history):
@@ -70,7 +139,16 @@ def get_cmd(history):
     command = {"実行コマンド": "echo recovery", "目的": f"{last['ノード']}の復旧処理"}
     request_id = secrets.token_urlsafe(32)
     approval_token = secrets.token_urlsafe(32)
-    pending_requests[request_id] = {"history": history, "command": command, "approval_token": approval_token, "status": "pending", "created_at": time.time()}
+    pending_requests[request_id] = {
+        "history": history,
+        "command": command,
+        "command_hash": command_hash(command),
+        "approval_token": approval_token,
+        "status": "pending",
+        "created_at": time.time(),
+        "failed_tokens": 0,
+        "delivered": False,
+    }
     return {"status": "pending", "request_id": request_id, "approval_url": build_approval_url(request_id, approval_token)}
 
 
@@ -78,7 +156,10 @@ def get_valid_item(request_id, token):
     item = pending_requests.get(request_id)
     if item is None:
         return None, (jsonify({"status": "not_found"}), 404)
-    if token != item["approval_token"]:
+    if item["failed_tokens"] >= MAX_FAILED_TOKENS:
+        return None, (jsonify({"status": "locked"}), 429)
+    if not safe_equal(token, item["approval_token"]):
+        item["failed_tokens"] += 1
         return None, (jsonify({"status": "unauthorized"}), 401)
     if item["status"] == "pending" and is_expired(item):
         item["status"] = "expired"
@@ -86,11 +167,17 @@ def get_valid_item(request_id, token):
 
 
 def decide(request_id, new_status):
-    item, error = get_valid_item(request_id, (request.get_json(silent=True) or {}).get("token"))
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    item, error = get_valid_item(request_id, body.get("token"))
     if error:
         return error
     if item["status"] != "pending":
         return jsonify({"status": item["status"]}), 409
+    # 承認は「承認者が画面で見たコマンド」に束縛する。ハッシュが一致しなければ承認しない。
+    if new_status == "approved" and not safe_equal(body.get("command_hash"), item["command_hash"]):
+        return jsonify({"status": "hash_mismatch"}), 400
     item["status"] = new_status
     return jsonify({"status": new_status})
 
@@ -99,7 +186,10 @@ def decide(request_id, new_status):
 def recovery():
     if not check_api_key():
         return jsonify({"エラー": "Unauthorized"}), 401
-    history = request.get_json()
+    history = request.get_json(silent=True)
+    error = validate_history(history)
+    if error:
+        return jsonify({"エラー": error}), 400
     return jsonify(get_cmd(history))
 
 
@@ -113,7 +203,11 @@ def result(request_id):
     if item["status"] == "pending" and is_expired(item):
         item["status"] = "expired"
     if item["status"] == "approved":
-        return jsonify({"status": "approved", "command": item["command"]})
+        if item["delivered"]:
+            # 承認は使い捨て。すでに一度渡したコマンドは再取得できない。
+            return jsonify({"status": "consumed"}), 410
+        item["delivered"] = True
+        return jsonify({"status": "approved", "command": item["command"], "command_hash": item["command_hash"]})
     return jsonify({"status": item["status"]})
 
 
@@ -122,7 +216,7 @@ def get_request(request_id):
     item, error = get_valid_item(request_id, request.args.get("token"))
     if error:
         return error
-    return jsonify({"status": item["status"], "history": item["history"], "command": item["command"]})
+    return jsonify({"status": item["status"], "history": item["history"], "command": item["command"], "command_hash": item["command_hash"]})
 
 
 @app.route("/api/request/<request_id>/approve", methods=["POST"])
