@@ -11,6 +11,7 @@
 import argparse
 import json
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -24,12 +25,6 @@ USER_AGENT = "gromacs-orchestrator/2.0"
 
 
 def api_request(method, url, api_key, body=None):
-    """復旧サーバーへHTTPリクエストを送る。
-
-    戻り値: (HTTPステータス, JSONのdict) 。
-    通信失敗・タイムアウト・JSONでない応答は (None, None) を返す(例外は投げない)。
-    履歴はリクエストボディで送るため、引数長の上限(約128KB)の影響を受けない。
-    """
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     headers = {"X-API-Key": api_key, "User-Agent": USER_AGENT, "Accept": "application/json"}
     if data is not None:
@@ -56,14 +51,8 @@ def api_request(method, url, api_key, body=None):
 
 
 def wait_for_approval(history, url, api_key, timeout):
-    """承認要求を作成し、承認・拒否・期限切れ・タイムアウトのいずれかまで待つ。
-
-    戻り値の status: approved / rejected / expired / not_found / timeout / error
-    """
     url = url.rstrip("/")
     deadline = time.time() + timeout
-
-    # 1. 承認要求を作成する。認証エラーは再試行しても直らないので即座に打ち切る。
     request_id = None
     while request_id is None:
         if time.time() > deadline:
@@ -78,8 +67,6 @@ def wait_for_approval(history, url, api_key, timeout):
             print("承認ページ: " + data["approval_url"])
         else:
             time.sleep(POLL_INTERVAL)
-
-    # 2. 承認結果をポーリングする。
     while time.time() <= deadline:
         code, result = api_request("GET", url + "/result/" + request_id, api_key)
         if code in (401, 403):
@@ -89,6 +76,23 @@ def wait_for_approval(history, url, api_key, timeout):
             return result
         time.sleep(POLL_INTERVAL)
     return {"status": "timeout"}
+
+
+def validate_plan(plan, start, end):
+    if not isinstance(plan, dict) or not plan:
+        raise SystemExit("plan が空、またはオブジェクトではありません")
+    for name, n in plan.items():
+        if not isinstance(n, dict):
+            raise SystemExit(f"ノード '{name}' がオブジェクトではありません")
+        for key in ("実行コマンド", "目的"):
+            if not isinstance(n.get(key), str):
+                raise SystemExit(f"ノード '{name}' に文字列の「{key}」がありません")
+        nxt = n.get("次のノード")
+        if nxt is not None and nxt not in plan:
+            raise SystemExit(f"ノード '{name}' の「次のノード」'{nxt}' は plan に存在しません")
+    for label, value in (("--start", start), ("--end", end)):
+        if value is not None and value not in plan:
+            raise SystemExit(f"{label} のノード '{value}' は plan に存在しません。使えるノード: {', '.join(plan)}")
 
 
 def main():
@@ -113,11 +117,13 @@ def main():
     execution_path = Path(a.executionpath or ".")
     history_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    validate_plan(plan, a.start, a.end)
     nodes = list(plan.keys())
     node = a.start or nodes[0]
     end = a.end or nodes[-1]
     history = []
     retries = 0
+    succeeded = False
     try:
         while True:
             n = plan[node]
@@ -134,25 +140,44 @@ def main():
                     print(f"リトライ上限({a.max_retries}回)に達したため停止します。")
                     break
                 retries += 1
-                recovery_result = wait_for_approval(history, a.recovery_url, a.api_key, a.timeout)
+                try:
+                    recovery_result = wait_for_approval(history, a.recovery_url, a.api_key, a.timeout)
+                except KeyboardInterrupt:
+                    print("承認待ちを中断しました。")
+                    raise
                 if recovery_result["status"] != "approved":
                     print("復旧コマンドが承認されなかったため停止します: " + recovery_result["status"])
                     break
-                cmd = recovery_result["command"]
-                cmd_r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
-                recovery_execution_result = {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": cmd_r.stdout, "エラー": cmd_r.stderr, "終了コード": cmd_r.returncode}
+                cmd = recovery_result.get("command")
+                if not isinstance(cmd, dict) or not isinstance(cmd.get("実行コマンド"), str) or not isinstance(cmd.get("目的"), str):
+                    print("復旧サーバーから不正な形式の復旧コマンドが返されたため停止します。")
+                    break
+                try:
+                    cmd_r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=execution_path, capture_output=True, text=True)
+                    recovery_execution_result = {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": cmd_r.stdout, "エラー": cmd_r.stderr, "終了コード": cmd_r.returncode}
+                except KeyboardInterrupt:
+                    history.append({"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": "", "エラー": "KeyboardInterrupt (^C)", "終了コード": -2})
+                    raise
                 history.append(recovery_execution_result)
                 if recovery_execution_result["終了コード"] != 0:
                     break
                 continue
-            if r.returncode != 0 or node == end:
+            if r.returncode != 0:
+                break
+            if node == end:
+                succeeded = True
                 break
             retries = 0
             node = n["次のノード"]
     finally:
         json.dump(history, open(history_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         json.dump(history, open(log_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    return succeeded
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(0 if main() else 1)
+    except KeyboardInterrupt:
+        print("中断されました。history は保存済みです。")
+        sys.exit(130)
