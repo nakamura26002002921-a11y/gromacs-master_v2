@@ -20,7 +20,6 @@ from datetime import datetime
 
 POLL_INTERVAL = 5
 HTTP_TIMEOUT = 30
-# Cloudflare が Python-urllib の既定 User-Agent を弾くことがあるため明示する
 USER_AGENT = "gromacs-orchestrator/2.0"
 
 
