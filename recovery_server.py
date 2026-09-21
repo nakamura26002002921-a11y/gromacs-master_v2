@@ -5,10 +5,15 @@
 #      export RECOVERY_API_KEY="$(openssl rand -hex 32)"
 #
 #   2. 承認ページのURLを設定
-#      export APPROVAL_URL="https://YOUR-USER.github.io/recovery-approval-v1/"
+#      export APPROVAL_URL="https://YOUR-USER.github.io/recovery_approval-v1/"
 #
 #   3. (任意) 承認の有効期限を秒で設定 (デフォルト 3600)
 #      export APPROVAL_TTL=3600
+#
+#   3'. (任意) 復旧サーバーの公開URLを設定
+#      未設定の場合は、オーケストレーターがアクセスしてきたURL(Host / X-Forwarded-*)から
+#      自動で決定し、承認URLの api= に付与する。
+#      export PUBLIC_URL="https://xxxx.trycloudflare.com"
 #
 #   4. 復旧サーバーを起動
 #      python3 recovery_server.py
@@ -20,6 +25,7 @@
 import os
 import secrets
 import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -29,6 +35,7 @@ CORS(app)
 API_KEY = os.environ["RECOVERY_API_KEY"]
 APPROVAL_URL = os.environ["APPROVAL_URL"]
 APPROVAL_TTL = int(os.environ.get("APPROVAL_TTL", "3600"))
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 
 pending_requests = {}
 
@@ -41,13 +48,30 @@ def is_expired(item):
     return time.time() - item["created_at"] > APPROVAL_TTL
 
 
+def get_public_url():
+    """承認ページが接続すべき、この復旧サーバーの公開URLを返す。"""
+    if PUBLIC_URL:
+        return PUBLIC_URL
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{scheme}://{host}"
+
+
+def build_approval_url(request_id, approval_token):
+    """APPROVAL_URL に既存のクエリがあっても壊れないように request_id / token / api を付与する。"""
+    parts = urlsplit(APPROVAL_URL)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in ("request_id", "token", "api")]
+    query += [("request_id", request_id), ("token", approval_token), ("api", get_public_url())]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
 def get_cmd(history):
     last = history[-1]
     command = {"実行コマンド": "echo recovery", "目的": f"{last['ノード']}の復旧処理"}
     request_id = secrets.token_urlsafe(32)
     approval_token = secrets.token_urlsafe(32)
     pending_requests[request_id] = {"history": history, "command": command, "approval_token": approval_token, "status": "pending", "created_at": time.time()}
-    return {"status": "pending", "request_id": request_id, "approval_url": APPROVAL_URL + "?request_id=" + request_id + "&token=" + approval_token}
+    return {"status": "pending", "request_id": request_id, "approval_url": build_approval_url(request_id, approval_token)}
 
 
 def get_valid_item(request_id, token):
