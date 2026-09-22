@@ -66,7 +66,6 @@ SCHEMA = {
 
 
 def require_env(name):
-    """必須の環境変数を読む。未設定なら分かりやすいメッセージで終了する。"""
     value = os.environ.get(name, "").strip()
     if not value:
         sys.exit(f"環境変数 {name} が設定されていません。ファイル冒頭の Usage を参照してください。")
@@ -84,7 +83,6 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 
 
 def get_cors_origins():
-    """承認ページ(GitHub Pages等)のオリジンだけを許可する。全オリジン開放にはしない。"""
     configured = [o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
     if configured:
         return configured
@@ -99,7 +97,6 @@ pending_requests = {}
 
 
 def safe_equal(a, b):
-    """タイミング攻撃を避けるため、定数時間で文字列を比較する。"""
     if not isinstance(a, str) or not isinstance(b, str):
         return False
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
@@ -110,7 +107,6 @@ def check_api_key():
 
 
 def command_hash(command):
-    """コマンド内容(実行コマンド+目的)のSHA-256。承認内容と実行内容が同一であることの検証に使う。"""
     canonical = json.dumps({"実行コマンド": command["実行コマンド"], "目的": command["目的"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -148,7 +144,6 @@ def is_expired(item):
 
 
 def get_public_url():
-    """承認ページが接続すべき、この復旧サーバーの公開URLを返す。"""
     if PUBLIC_URL:
         return PUBLIC_URL
     scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
@@ -157,13 +152,6 @@ def get_public_url():
 
 
 def build_approval_url(request_id, approval_token):
-    """承認URLを組み立てる。
-
-    request_id / api はクエリに、承認トークンはフラグメント(#)に入れる。
-    フラグメントはブラウザからサーバー(GitHub Pages等)へ送信されず、Refererにも載らないため、
-    トークンがアクセスログ等に残らない。
-    APPROVAL_URL に既存のクエリがあっても壊れない。
-    """
     parts = urlsplit(APPROVAL_URL)
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in ("request_id", "token", "api")]
     query += [("request_id", request_id), ("api", get_public_url())]
@@ -172,10 +160,6 @@ def build_approval_url(request_id, approval_token):
 
 
 def validate_history(history):
-    """履歴が「ノード・実行コマンド等を持つdictの空でないリスト」であることを確認する。
-
-    問題があればエラーメッセージ、なければ None を返す。
-    """
     if not isinstance(history, list) or not history:
         return "history は空でない配列で送ってください"
     for i, entry in enumerate(history):
@@ -232,7 +216,6 @@ def decide(request_id, new_status):
         return error
     if item["status"] != "pending":
         return jsonify({"status": item["status"]}), 409
-    # 承認は「承認者が画面で見たコマンド」に束縛する。ハッシュが一致しなければ承認しない。
     if new_status == "approved" and not safe_equal(body.get("command_hash"), item["command_hash"]):
         return jsonify({"status": "hash_mismatch"}), 400
     item["status"] = new_status
@@ -261,7 +244,6 @@ def result(request_id):
         item["status"] = "expired"
     if item["status"] == "approved":
         if item["delivered"]:
-            # 承認は使い捨て。すでに一度渡したコマンドは再取得できない。
             return jsonify({"status": "consumed"}), 410
         item["delivered"] = True
         return jsonify({"status": "approved", "command": item["command"], "command_hash": item["command_hash"]})
