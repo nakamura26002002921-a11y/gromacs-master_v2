@@ -7,22 +7,25 @@
 #   2. 承認ページのURLを設定
 #      export APPROVAL_URL="https://YOUR-USER.github.io/recovery_approval-v1/"
 #
-#   3. (任意) 承認の有効期限を秒で設定 (デフォルト 3600)
+#   3. LLMで復旧コマンドを自動生成するためのGroq APIキーを設定
+#      export GROQ_API_KEY="gsk_..."
+#
+#   4. (任意) 承認の有効期限を秒で設定 (デフォルト 3600)
 #      export APPROVAL_TTL=3600
 #
-#   4. (任意) 承認ページからのアクセスを許可するオリジンをカンマ区切りで設定
+#   5. (任意) 承認ページからのアクセスを許可するオリジンをカンマ区切りで設定
 #      未設定の場合は APPROVAL_URL のオリジン(scheme://host)のみ許可する。
 #      export CORS_ORIGINS="https://YOUR-USER.github.io"
 #
-#   5. (任意) 復旧サーバーの公開URLを設定
+#   6. (任意) 復旧サーバーの公開URLを設定
 #      未設定の場合は、オーケストレーターがアクセスしてきたURL(Host / X-Forwarded-*)から
 #      自動で決定し、承認URLの api= に付与する。
 #      export PUBLIC_URL="https://xxxx.trycloudflare.com"
 #
-#   6. 復旧サーバーを起動
+#   7. 復旧サーバーを起動
 #      python3 recovery_server.py
 #
-#   7. Cloudflare Tunnel等でHTTPS公開
+#   8. Cloudflare Tunnel等でHTTPS公開
 #      cloudflared tunnel --url http://127.0.0.1:5000
 # ============================================================
 
@@ -36,6 +39,30 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from groq import Groq
+
+
+SYSTEM_PROMPT = """
+目的：
+エラーが起きたから、復元のコマンドを書いて
+
+- 実行コマンド: 入力するコマンド
+- 目的: なぜそのコマンドなのか?
+
+すべてのフィールドは指定されたJSON Schemaの型を厳密に守る。
+JSON以外の文章を出力しない。
+"""
+
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "実行コマンド": {"type": "string"},
+        "目的": {"type": "string"},
+    },
+    "required": ["実行コマンド", "目的"],
+    "additionalProperties": False
+}
 
 
 def require_env(name):
@@ -48,6 +75,7 @@ def require_env(name):
 
 API_KEY = require_env("RECOVERY_API_KEY")
 APPROVAL_URL = require_env("APPROVAL_URL")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 try:
     APPROVAL_TTL = int(os.environ.get("APPROVAL_TTL", "3600"))
 except ValueError:
@@ -85,6 +113,30 @@ def command_hash(command):
     """コマンド内容(実行コマンド+目的)のSHA-256。承認内容と実行内容が同一であることの検証に使う。"""
     canonical = json.dumps({"実行コマンド": command["実行コマンド"], "目的": command["目的"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def call_vocab(history, api_key):
+    client = Groq(api_key=api_key)
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"エラー:\n{history}"}
+        ],
+        temperature=0,
+        max_tokens=2000,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "recovery",
+                "strict": True,
+                "schema": SCHEMA
+            }
+        }
+    )
+    usage = response.usage
+    print(f"  tokens: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}, total={usage.total_tokens}")
+    return json.loads(response.choices[0].message.content)
 
 
 # ---- 承認トークンの総当たり対策: request_id ごとの失敗回数を制限する ----
@@ -137,6 +189,11 @@ def validate_history(history):
 def get_cmd(history):
     last = history[-1]
     command = {"実行コマンド": "echo recovery", "目的": f"{last['ノード']}の復旧処理"}
+    if GROQ_API_KEY:
+        try:
+            command = call_vocab(history, GROQ_API_KEY)
+        except Exception as e:
+            print(f"LLMによる復旧コマンド生成に失敗したため固定コマンドを使います: {e}")
     request_id = secrets.token_urlsafe(32)
     approval_token = secrets.token_urlsafe(32)
     pending_requests[request_id] = {
