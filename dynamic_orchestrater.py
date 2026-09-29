@@ -1,115 +1,193 @@
 # dynamic_orchestrater.py
-#===========================================================
+# ============================================================
 # Usage:
-#   export RECOVERY_API_KEY="..."
-#   python3 dynamic_orchestrater.py -p plan.json --recovery-url https://example.com
-#   python3 dynamic_orchestrater.py -p plan.json -s nvt -e npt_pr -ep /path/to/workdir --recovery-url https://example.com
-#===========================================================
+#   python3 dynamic_orchestrater.py -p plan.json --api-key "gsk_..."
+#   python3 dynamic_orchestrater.py -p plan.json --api-key "gsk_..." --server-url "https://xxxx.trycloudflare.com"
+#   python3 dynamic_orchestrater.py -p plan.json --api-key "gsk_..." -s nvt -e npt_pr -ep /path/to/workdir --server-url "https://xxxx.trycloudflare.com"
+# ============================================================
 
 import argparse
-import hashlib
-import hmac
 import json
-import os
+import requests
 import subprocess
 import sys
 import time
-import urllib.request
-from pathlib import Path
+import uuid
 from datetime import datetime
-
-POLL = 5
-
-
-def command_hash(cmd):
-    canonical = json.dumps({"実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+from pathlib import Path
+from groq import Groq
 
 
-def api(method, url, body=None):
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-    headers = {"X-API-Key": os.environ["RECOVERY_API_KEY"], "User-Agent": "gromacs-orchestrator/2.0", "Content-Type": "application/json"}
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=headers), timeout=30) as res:
-            return json.loads(res.read().decode("utf-8"))
-    except Exception as e:
-        print(f"復旧サーバーに接続できません: {e}")
-        return {}
+SYSTEM_PROMPT = """
+Purpose:
+A command failed. Write a command to recover from the error.
+
+- command: The command to execute
+- purpose: Why this command is necessary
+
+All fields must strictly follow the specified JSON Schema types.
+Output JSON only. Do not output any other text.
+"""
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "command": {"type": "string"},
+        "purpose": {"type": "string"}
+    },
+    "required": ["command", "purpose"],
+    "additionalProperties": False
+}
 
 
-def wait_for_approval(history, url, timeout):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        res = api("POST", url + "/", history)
-        if res.get("request_id"):
-            print("承認ページ: " + res["approval_url"])
-            rid = res["request_id"]
-            break
-        time.sleep(POLL)
-    else:
-        return {"status": "timeout"}
-    while time.time() < deadline:
-        res = api("GET", url + "/result/" + rid)
-        if res.get("status") not in (None, "pending"):
-            return res
-        time.sleep(POLL)
-    return {"status": "timeout"}
+def call_llm(history, api_key):
+    client = Groq(api_key=api_key)
+    failed = history[-1]
+    context = {
+        "実行コマンド": failed["実行コマンド"],
+        "目的": failed["目的"],
+        "returncode": failed["returncode"],
+        "stderr": failed["stderr"]
+    }
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)}
+        ],
+        temperature=0,
+        max_tokens=2000,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "recovery_command",
+                "strict": True,
+                "schema": SCHEMA
+            }
+        }
+    )
+    return json.loads(response.choices[0].message.content)
+
+
+def create_approval_request(server_url, request_id, command, purpose):
+    response = requests.post(f"{server_url}/api/requests", json={"id": request_id, "purpose": purpose, "command": command}, timeout=10)
+    return response.json()
+
+
+def get_approval_request(server_url, request_id):
+    response = requests.get(f"{server_url}/api/requests/{request_id}", timeout=10)
+    return response.json()
+
+
+def wait_for_approval(server_url, request_id, timeout, interval):
+    started = time.time()
+    while True:
+        data = get_approval_request(server_url, request_id)
+        if data["status"] == "承認済み":
+            return data
+        if time.time() - started >= timeout:
+            return None
+        print(f"Waiting for approval: {request_id} ({int(time.time() - started)} seconds elapsed)")
+        time.sleep(interval)
 
 
 def run(node, cmd, cwd):
-    r = subprocess.run(cmd["実行コマンド"], shell=True, cwd=cwd, capture_output=True, text=True)
-    return {"ノード": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "出力": r.stdout, "エラー": r.stderr, "終了コード": r.returncode}
+    print(f"[{node}] Executing: {cmd['実行コマンド']}")
+    result = subprocess.run(cmd["実行コマンド"], shell=True, cwd=cwd, capture_output=True, text=True)
+    return {
+        "node": node,
+        "実行コマンド": cmd["実行コマンド"],
+        "目的": cmd["目的"],
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr
+    }
+
+
+def save_history(history, history_path, log_path):
+    data = json.dumps(history, ensure_ascii=False, indent=2)
+    history_path.write_text(data, encoding="utf-8")
+    log_path.write_text(data, encoding="utf-8")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("-p", "--plan", required=True)
+    p.add_argument("--api-key", required=True)
     p.add_argument("--history")
     p.add_argument("-l", "--logpath")
     p.add_argument("-s", "--start")
     p.add_argument("-e", "--end")
     p.add_argument("-ep", "--executionpath", default=".")
-    p.add_argument("--recovery-url", default="")
     p.add_argument("--max-retries", type=int, default=3)
-    p.add_argument("--timeout", type=int, default=3600)
+    p.add_argument("--server-url", required=True)
+    p.add_argument("--approval-timeout", type=int, default=3600)
+    p.add_argument("--approval-interval", type=int, default=5)
     a = p.parse_args()
-    plan = json.load(open(a.plan, encoding="utf-8"))
+
+    plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    paths = [Path(a.history or f"histories/{Path(a.plan).stem}_{now}.json"), Path(a.logpath or f"logs/{Path(a.plan).stem}_{now}.json")]
-    for path in paths:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    node = a.start or next(iter(plan))
-    end = a.end or list(plan)[-1]
+    history_path = Path(a.history) if a.history else Path(f"histories/{Path(a.plan).stem}_{now}.json")
+    log_path = Path(a.logpath) if a.logpath else Path(f"logs/{Path(a.plan).stem}_{now}.json")
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     history = []
-    retries = 0
-    try:
-        while True:
-            history.append(run(node, plan[node], a.executionpath))
-            if history[-1]["終了コード"] == 0:
-                if node == end:
-                    return True
-                retries = 0
-                node = plan[node]["次のノード"]
-                continue
-            if not a.recovery_url or retries >= a.max_retries:
-                return False
-            retries += 1
-            res = wait_for_approval(history, a.recovery_url.rstrip("/"), a.timeout)
-            cmd = res.get("command")
-            if res["status"] != "approved" or not hmac.compare_digest(res.get("command_hash", ""), command_hash(cmd)):
-                print("復旧コマンドが承認されなかった、または内容が一致しないため停止します: " + res["status"])
-                return False
-            history.append(run(node, cmd, a.executionpath))
-            if history[-1]["終了コード"] != 0:
-                return False
-    finally:
-        for path in paths:
-            json.dump(history, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    start = a.start or next(iter(plan))
+    end = a.end or list(plan)[-1]
+    node = start
+
+    while True:
+        result = run(node, plan[node], a.executionpath)
+        history.append(result)
+        save_history(history, history_path, log_path)
+
+        if result["returncode"] == 0:
+            if node == end:
+                return 0
+            node = plan[node]["次のノード"]
+            continue
+
+        recovered = False
+
+        for retry in range(a.max_retries):
+            recovery_command = call_llm(history, a.api_key)
+            request_id = f"{Path(a.plan).stem}_{node}_{uuid.uuid4().hex[:8]}"
+
+            print(f"Recovery command is waiting for approval: {request_id}")
+            create_approval_request(a.server_url, request_id, recovery_command["command"], recovery_command["purpose"])
+
+            approved = wait_for_approval(a.server_url, request_id, a.approval_timeout, a.approval_interval)
+
+            if approved is None:
+                print("Approval was not received.")
+                return 1
+
+            recovery_command = {
+                "実行コマンド": approved["command"],
+                "目的": approved["purpose"]
+            }
+
+            print("Approval confirmed. Executing recovery command.")
+            recovery_result = run(node, recovery_command, a.executionpath)
+            history.append(recovery_result)
+            save_history(history, history_path, log_path)
+
+            if recovery_result["returncode"] == 0:
+                recovered = True
+                break
+
+        if not recovered:
+            return 1
+
+        if node == end:
+            return 0
+
+        node = plan[node]["次のノード"]
 
 
 if __name__ == "__main__":
     try:
-        sys.exit(0 if main() else 1)
+        sys.exit(main())
     except KeyboardInterrupt:
-        print("中断されました。")
+        print("Interrupted.")
         sys.exit(130)
