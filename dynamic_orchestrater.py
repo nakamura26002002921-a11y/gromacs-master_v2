@@ -6,6 +6,8 @@
 #   python3 dynamic_orchestrater.py -p plan.json --api-key "gsk_..." --offline-host 192.168.1.100
 #   python3 dynamic_orchestrater.py -p plan.json --api-key "gsk_..." --offline-host 192.168.1.100 --offline-port 5000
 #   python3 dynamic_orchestrater.py -p plan.json --api-key "gsk_..." -s nvt -e npt_pr -ep /path/to/workdir --offline-host 192.168.1.100 --offline-port 5000
+#   python3 dynamic_orchestrater.py -p plan.json --api-key "gsk_..." --offline-host 172.25.2.122 --approval-api http://127.0.0.1:5000
+#   (--approval-api: ブラウザから見える API の URL。ssh -L のトンネル経由なら http://127.0.0.1:5000 を指定する)
 #   (--api-key は Groq の API キー。復旧サーバーのキーは環境変数 RECOVERY_API_KEY か --recovery-api-key で渡す)
 # ============================================================
 
@@ -17,6 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from datetime import datetime
 from pathlib import Path
 from groq import Groq
@@ -96,12 +99,26 @@ def run(node, cmd, cwd):
     return {"node": node, "実行コマンド": cmd["実行コマンド"], "目的": cmd["目的"], "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 
+def rewrite_approval_api(approval_url, approval_api):
+    """承認 URL の #...&api=... の値だけを approval_api に差し替える。
+
+    approval_api が空なら何もしない。トークンなど他のパラメータは変更しない。
+    """
+    if not approval_api:
+        return approval_url
+    parts = urlsplit(approval_url)
+    params = [(k, approval_api if k == "api" else v) for k, v in parse_qsl(parts.fragment, keep_blank_values=True)]
+    if not any(k == "api" for k, _ in params):
+        params.append(("api", approval_api))
+    return parts._replace(fragment=urlencode(params, safe="")).geturl()
+
+
 def request_recovery(a, server_url, node, history):
     proposal = call_llm(history, a.api_key)
     request_id = f"{Path(a.plan).stem}_{node}_{uuid.uuid4().hex[:8]}"
     created = create_approval_request(server_url, request_id, proposal["command"], proposal["purpose"], a.recovery_api_key)
     print(f"Recovery command is waiting for approval: {request_id}")
-    print(f"Approval URL: {created['approval_url']}")
+    print(f"Approval URL: {rewrite_approval_api(created['approval_url'], a.approval_api)}")
     approved = wait_for_approval(server_url, request_id, a.recovery_api_key, a.approval_timeout, a.approval_interval)
     if approved is None:
         print("Approval was not received.")
@@ -127,6 +144,7 @@ def main():
     p.add_argument("--server-url")
     p.add_argument("--offline-host")
     p.add_argument("--offline-port", type=int, default=5000)
+    p.add_argument("--approval-api", default=os.environ.get("APPROVAL_API", "").rstrip("/"), help="承認ページ(ブラウザ)から見える API の URL。ssh -L のトンネル経由なら http://127.0.0.1:5000")
     p.add_argument("--approval-timeout", type=int, default=3600)
     p.add_argument("--approval-interval", type=int, default=5)
     a = p.parse_args()
