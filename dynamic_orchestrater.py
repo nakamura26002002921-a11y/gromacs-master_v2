@@ -65,24 +65,27 @@ def call_llm(history, api_key):
     )
     return json.loads(response.choices[0].message.content)
 
-def create_approval_request(server_url, request_id, command, purpose):
-    response = requests.post(f"{server_url}/api/requests", json={"id": request_id, "purpose": purpose, "command": command}, timeout=10)
+def create_approval_request(server_url, request_id, command, purpose, api_key):
+    response = requests.post(f"{server_url}/api/requests", json={"id": request_id, "purpose": purpose, "command": command}, headers={"X-API-Key": api_key}, timeout=10)
     return response.json()
-    
-def get_approval_request(server_url, request_id):
-    response = requests.get(f"{server_url}/api/requests/{request_id}", timeout=10)
+
+def get_approval_request(server_url, request_id, api_key):
+    response = requests.get(f"{server_url}/api/requests/{request_id}", headers={"X-API-Key": api_key}, timeout=10)
     return response.json()
-    
-def wait_for_approval(server_url, request_id, timeout, interval):
+
+def wait_for_approval(server_url, request_id, api_key, timeout, interval):
     started = time.time()
     while True:
-        data = get_approval_request(server_url, request_id)
+        data = get_approval_request(server_url, request_id, api_key)
         if data["status"] == "承認済み":
             return data
+        if data["status"] in ("却下", "期限切れ"):
+            return None
         if time.time() - started >= timeout:
             return None
         print(f"Waiting for approval: {request_id} ({int(time.time() - started)} seconds elapsed)")
         time.sleep(interval)
+        
 def run(node, cmd, cwd):
     print(f"[{node}] Executing: {cmd['実行コマンド']}")
     result = subprocess.run(cmd["実行コマンド"], shell=True, cwd=cwd, capture_output=True, text=True)
