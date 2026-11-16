@@ -109,12 +109,11 @@ def rewrite_approval_api(approval_url, approval_api):
     return parts._replace(fragment=urlencode(params, safe="")).geturl()
 
 
-def request_recovery(a, server_url, node, history):
+def request_recovery(a, server_url, node, history, request_id):
     proposal = call_llm(history, a.api_key)
-    request_id = f"{Path(a.plan).stem}_{node}_{uuid.uuid4().hex[:8]}"
     created = create_approval_request(server_url, request_id, proposal["command"], proposal["purpose"], a.recovery_api_key)
     print(f"Recovery command is waiting for approval: {request_id}")
-    print(f"Approval URL: {rewrite_approval_api(created['approval_url'], a.approval_api)}")
+    print(f"Approval URL: {created['approval_url']}")
     approved = wait_for_approval(server_url, request_id, a.recovery_api_key, a.approval_timeout, a.approval_interval)
     if approved is None:
         print("Approval was not received.")
@@ -162,6 +161,7 @@ def main():
     node = a.start or next(iter(plan))
     end = a.end or list(plan)[-1]
     retries = 0
+    request_id = uuid.uuid4().hex[:8]
     while True:
         result = run(node, plan[node], a.executionpath)
         history.append(result)
@@ -175,7 +175,7 @@ def main():
         recovered = False
         while not recovered and retries < a.max_retries:
             retries += 1
-            recovery_result = request_recovery(a, server_url, node, history)
+            recovery_result = request_recovery(a, server_url, node, history, request_id)
             if recovery_result is None:
                 return 1
             history.append(recovery_result)
