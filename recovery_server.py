@@ -161,6 +161,9 @@ def approve(request_id):
 def reject(request_id):
     return update_status(request_id, "却下")
 
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"name": "recovery_server", "status": "ok"})
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
