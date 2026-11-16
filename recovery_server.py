@@ -1,3 +1,4 @@
+
 # recovery_server.py
 # ============================================================
 # Usage:
@@ -14,26 +15,28 @@
 #      export APPROVAL_TTL=3600
 #
 #   5. (任意) 承認ページからのアクセスを許可するオリジンをカンマ区切りで設定
-#      未設定の場合は APPROVAL_URL のオリジン(scheme://host)のみ許可する。
 #      export CORS_ORIGINS="https://YOUR-USER.github.io"
 #
 #   6. (任意) 復旧サーバーの公開URLを設定
-#      未設定の場合は、オーケストレーターがアクセスしてきたURL(Host / X-Forwarded-*)から
-#      自動で決定し、承認URLの api= に付与する。
 #      export PUBLIC_URL="https://xxxx.trycloudflare.com"
 #
-#   7. 復旧サーバーを起動
+#   7. 通常起動
 #      python3 recovery_server.py
 #
-#   8. Cloudflare Tunnel等でHTTPS公開
+#   8. オフライン起動（同一ネットワーク内に公開）
+#      python3 recovery_server.py --offline
+#
+#   9. Cloudflare Tunnelを使用する場合（通常起動時）
 #      cloudflared tunnel --url http://127.0.0.1:5000
 # ============================================================
 
+import argparse
 import hashlib
 import hmac
 import json
 import os
 import secrets
+import socket
 import sys
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -65,6 +68,11 @@ SCHEMA = {
 }
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--offline", action="store_true", help="同一ネットワーク内に公開する")
+ARGS = parser.parse_args()
+
+
 def require_env(name):
     value = os.environ.get(name, "").strip()
     if not value:
@@ -80,6 +88,14 @@ try:
 except ValueError:
     sys.exit("環境変数 APPROVAL_TTL は整数(秒)で指定してください。")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+
+
+def get_local_ip():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.connect(("8.8.8.8", 80))
+    ip = sock.getsockname()[0]
+    sock.close()
+    return ip
 
 
 def get_cors_origins():
@@ -135,7 +151,7 @@ def call_vocab(history, api_key):
     return json.loads(response.choices[0].message.content)
 
 
-# ---- 承認トークンの総当たり対策: request_id ごとの失敗回数を制限する ----
+# ---- 承認トークンの総当たり対策 ----
 MAX_FAILED_TOKENS = 5
 
 
@@ -144,6 +160,8 @@ def is_expired(item):
 
 
 def get_public_url():
+    if ARGS.offline:
+        return f"http://{get_local_ip()}:5000"
     if PUBLIC_URL:
         return PUBLIC_URL
     scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
@@ -269,4 +287,10 @@ def reject(request_id):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000)
+    if ARGS.offline:
+        host = "0.0.0.0"
+        print(f"Offline mode: http://{get_local_ip()}:5000")
+        print("同一ネットワーク内の端末から上記URLでアクセスできます。")
+    else:
+        host = "127.0.0.1"
+    app.run(host=host, port=5000)
