@@ -1,12 +1,39 @@
 # gromacs-master_v2
 
 GROMACS の分子動力学シミュレーションを、JSON で定義した**ノードのグラフ**として順番に実行するオーケストレーターです。
-ノードが失敗したとき、**人間の承認を挟んで**復旧コマンドを実行し、同じノードをやり直せます。
 
-- ノードとその遷移を JSON (plan) で宣言する
-- 失敗したら履歴を復旧サーバーへ送り、スマホ等の PWA で承認してから復旧コマンドを実行する
-- 実行結果はすべて history / log として JSON に残る
+- ノードとその遷移(`次のノード`)を JSON (plan) で宣言する
+- **static**: 失敗したらそこで停止する
+- **dynamic**: 失敗したら LLM(Groq)が復旧コマンドを提案し、**人間の承認**を得てから実行する
 
+## 全体像
+
+```mermaid
+graph TD
+    T["templates/example1.json<br/>テンプレート ({PATH} などを含む)"]
+    C["createplan.py<br/>対話入力で {...} を埋める"]
+    P["plans/*.json<br/>plan"]
+    S["static_orchestrater.py<br/>失敗したら停止"]
+    D["dynamic_orchestrater.py<br/>失敗したら承認つき復旧"]
+    G["GROMACS (gmx)"]
+    L["Groq API<br/>復旧コマンドを生成"]
+    R["recovery_server.py<br/>承認要求の受付 (Flask)"]
+    A["承認者<br/>承認画面から承認 / 却下"]
+    H["histories/*.json<br/>logs/*.json"]
+
+    T --> C --> P
+    P --> S
+    P --> D
+    S --> G
+    D --> G
+    S --> H
+    D --> H
+    D -- "失敗の情報を送る" --> L
+    L -- "command / purpose" --> D
+    D -- "承認要求を POST" --> R
+    D -- "状態をポーリング" --> R
+    A -- "approve / reject" --> R
+```
 
 ## ファイル構成
 
@@ -14,35 +41,33 @@ GROMACS の分子動力学シミュレーションを、JSON で定義した**�
 |---|---|
 | `createplan.py` | テンプレートの `{PATH}` などを対話入力で埋めて plan を生成する |
 | `static_orchestrater.py` | plan を順に実行する。失敗したらそこで停止する |
-| `dynamic_orchestrater.py` | 失敗時に復旧サーバーへ問い合わせ、承認されたら復旧コマンドを実行して再試行する |
+| `dynamic_orchestrater.py` | 失敗時に Groq で復旧コマンドを生成し、承認されたら実行する |
 | `recovery_server.py` | 復旧コマンドの承認要求を受け付ける Flask サーバー |
-| `templates/example1.json` | タンパク質系の平衡化から本番MD・解析までのテンプレート |
-
-承認画面(PWA)は別リポジトリ [recovery_approval-v1](https://github.com/nakamura26002002921-a11y/recovery_approval-v1) にあります。
+| `templates/example1.json` | タンパク質系の構築から平衡化・本番MD・解析までのテンプレート(22ノード) |
+| `requirements.txt` | `Flask`, `flask-cors`, `groq` |
 
 ## 必要なもの
 
 - Python 3.9 以上
 - GROMACS(`gmx` が実行できること)
-- 承認画面をスマホで開く場合は HTTPS 公開の手段(Cloudflare Tunnel など)
+- dynamic を使う場合: Groq の API キー
+- 承認画面をスマホ等から開く場合は、`recovery_server.py` を外部から到達できるようにする手段(Cloudflare Tunnel など)
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`utils/call_llm.py` を使う場合のみ、別途 `pip install groq` が必要です。
-
 ## 使い方
 
 ### 1. plan を作る
 
-テンプレート中の `{...}` を対話入力で埋めます。
+テンプレート中の `{...}` を対話入力で埋めます。入力値に `"` や `\` が含まれていても JSON が壊れないようエスケープされます。
 
 ```bash
 python3 createplan.py -t templates/example1.json -o plans/example.json
 ```
 
-`example1.json` で入力するパラメータは次の 7 つです。
+`-o` を省略すると `plans/<日時>.json` に出力されます。`example1.json` で入力するパラメータは次の 7 つです。
 
 | パラメータ | 意味 |
 |---|---|
@@ -53,6 +78,7 @@ python3 createplan.py -t templates/example1.json -o plans/example.json
 | `FORCE_FIELD` | `pdb2gmx -ff` に渡す力場 |
 | `DISTANCE` | `editconf -d` に渡すボックス端までの距離 |
 | `WATERBOXFILE` | `solvate -cs` に渡す水ボックスのファイル |
+
 
 ### 2. 復旧なしで実行する(static)
 
@@ -77,146 +103,146 @@ python3 static_orchestrater.py -p plans/example.json -ep /path/to/workdir
 
 `recovery_server.py` を先に起動してから、`dynamic_orchestrater.py` を実行します。
 
-**復旧サーバー側**
+#### 復旧サーバー側
 
 ```bash
 export RECOVERY_API_KEY="$(openssl rand -hex 32)"
 export APPROVAL_URL="https://YOUR-USER.github.io/recovery_approval-v1/"
-export APPROVAL_TTL=3600    # 任意。承認の有効期限(秒)
-export PUBLIC_URL="https://xxxx.trycloudflare.com"    # 任意。未設定なら受信したリクエストのURLから自動決定
-export CORS_ORIGINS="https://YOUR-USER.github.io"     # 任意。未設定なら APPROVAL_URL のオリジンのみ許可
-python3 recovery_server.py
+export APPROVAL_TTL=3600        # 任意。承認の有効期限(秒)
+export CORS_ORIGINS="https://YOUR-USER.github.io"   # 任意。未設定なら APPROVAL_URL のオリジンのみ許可
+
+python3 recovery_server.py                           # 127.0.0.1:5000 で起動
+python3 recovery_server.py --offline                 # 0.0.0.0:5000 で起動 (LAN公開)
+python3 recovery_server.py --offline --offline-port 8000   # ポート指定
+```
+
+| 環境変数 | 必須 | 説明 |
+|---|---|---|
+| `RECOVERY_API_KEY` | 必須 | サーバーの API キー。未設定だと起動時に終了する |
+| `APPROVAL_URL` | 必須 | 承認画面の URL。コード上は CORS の既定オリジンを決めるためだけに使われる |
+| `APPROVAL_TTL` | 任意 | 承認の有効期限(秒)。既定 `3600` |
+| `PUBLIC_URL` | 任意 | 承認 URL に載せる、このサーバーの公開 URL。未設定なら受信したリクエストの URL(`X-Forwarded-Proto` と `Host`)から決める |
+| `CORS_ORIGINS` | 任意 | 許可するオリジン(カンマ区切り)。未設定なら `APPROVAL_URL` のオリジン |
+
+| 起動オプション | 説明 |
+|---|---|
+| `--offline` | `0.0.0.0` にバインドして LAN に公開する。省略時は `127.0.0.1` |
+| `--offline-port` | 待ち受けポート(既定 `5000`)。`--offline` なしでも有効 |
+
+本番運用では gunicorn でも起動できます(この場合 `--offline` / `--offline-port` は使えません)。
+
+```bash
+gunicorn -b 127.0.0.1:5000 recovery_server:app
+```
+
+インターネット経由で公開する場合は、別途トンネルを張ります。
+
+```bash
 cloudflared tunnel --url http://127.0.0.1:5000
 ```
 
-**オーケストレーター側**
+#### オーケストレーター側
+
+接続先は `--server-url` と `--offline-host` の**どちらか一方**を必ず指定します(両方・どちらも未指定はエラー)。
 
 ```bash
-export RECOVERY_API_KEY="サーバーと同じ値"    # 環境変数で渡す(--api-key は ps に見えるため非推奨)
-python3 dynamic_orchestrater.py -p plans/example.json --recovery-url https://xxxx.trycloudflare.com
+export RECOVERY_API_KEY="サーバーと同じ値"    # 復旧サーバーの API キー
+
+# Cloudflare Tunnel などの URL を使う場合
+python3 dynamic_orchestrater.py -p plans/example.json --api-key "gsk_..." \
+    --server-url https://xxxx.trycloudflare.com
+
+# LAN 内のサーバーを使う場合
+python3 dynamic_orchestrater.py -p plans/example.json --api-key "gsk_..." \
+    --offline-host 192.168.1.100 --offline-port 5000
 ```
 
-static の引数に加えて、次のオプションがあります。
+static の `-p` `-s` `-e` `-ep` `--history` `-l` に加えて、次のオプションがあります。
 
 | オプション | 既定値 | 説明 |
 |---|---|---|
-| `--recovery-url` | 空 | 復旧サーバーの URL。省略すると復旧なし(失敗で停止) |
-| `--api-key-file` | 空 | APIキーを書いたファイル(先頭1行)。`chmod 600` 推奨 |
-| `--api-key` | 空 | 非推奨。`ps` やシェル履歴にキーが残る。環境変数 `RECOVERY_API_KEY` を優先して使う |
-| `--max-retries` | `3` | 同じノードで復旧を試みる上限回数。次のノードへ進むとリセットされる |
-| `--timeout` | `3600` | 承認待ちを打ち切るまでの秒数 |
+| `--api-key` | (必須) | **Groq の API キー**。復旧コマンドの生成に使う |
+| `--recovery-api-key` | 環境変数 `RECOVERY_API_KEY` | **復旧サーバーの API キー**。`--recovery-api-key` は `ps` に見えるので、環境変数を推奨 |
+| `--server-url` | なし | 復旧サーバーの URL(`--offline-host` と排他) |
+| `--offline-host` | なし | 復旧サーバーのホスト。`http://<host>:<port>` として接続する(`--server-url` と排他) |
+| `--offline-port` | `5000` | `--offline-host` 使用時のポート(1〜65535) |
+| `--max-retries` | `3` | 1 ノードあたり、復旧コマンドを試す上限回数。次のノードへ進むとリセットされる |
+| `--approval-timeout` | `3600` | 承認待ちを打ち切るまでの秒数 |
+| `--approval-interval` | `5` | 承認状態を確認する間隔(秒) |
+
+`-ep` の既定値は `.`(カレントディレクトリ)です。
 
 ## 復旧フロー
 
-失敗したノードの履歴がサーバーに送られ、承認者が画面で内容を確認して承認または拒否します。
+ノードが失敗すると、失敗したコマンドの情報(`実行コマンド`・`目的`・`returncode`・`stderr` の末尾 2000 文字。復旧コマンドが失敗していれば、元の失敗から順にすべて)を Groq(モデル `openai/gpt-oss-120b`)に送り、復旧コマンドと理由を JSON で受け取ります。それを承認要求として復旧サーバーに登録し、承認されるまで待ちます。
 
 ```mermaid
-sequenceDiagram
-    participant O as dynamic_orchestrater.py<br/>(非公開サーバー)
-    participant S as recovery_server.py<br/>(公開・Cloudflare Tunnel)
-    participant P as PWA 承認画面<br/>(GitHub Pages)
-    actor U as 承認者
+graph TD
+    A["ノードを実行"] --> B{"終了コードは 0 ?"}
+    B -- "はい" --> C{"終了ノード -e か ?"}
+    C -- "はい" --> OK["終了 (exit 0)"]
+    C -- "いいえ" --> N["次のノードへ"]
+    N --> A
 
-    O->>O: ノードを実行し失敗 (終了コード != 0)
-    O->>S: POST / (history, X-API-Key)
-    S-->>O: request_id と approval_url (pending)
-    O->>U: approval_url を表示
-    U->>P: approval_url を開く
-    P->>S: GET /api/request/{id}?token=...
-    S-->>P: history と復旧コマンド
-    U->>P: 承認 または 拒否
-    P->>S: POST /api/request/{id}/approve か reject
-    loop 5秒ごと (--timeout まで)
-        O->>S: GET /result/{id} (X-API-Key)
-        S-->>O: pending / approved / rejected / expired
-    end
-    alt approved
-        O->>O: 復旧コマンドを実行し、同じノードを再実行
-    else rejected / expired / timeout
-        O->>O: 停止して history を保存
-    end
+    B -- "いいえ" --> L["Groq が復旧コマンドを生成"]
+    L --> Q["承認要求を POST /api/requests"]
+    Q --> W["承認状態をポーリング"]
+    W --> X{"承認状態"}
+    X -- "却下 / 期限切れ / タイムアウト" --> NG["停止 (exit 1)"]
+    X -- "承認済み" --> V{"承認したコマンドは<br/>提案したものと同じ ?"}
+    V -- "いいえ" --> NG
+    V -- "はい" --> RC["復旧コマンドを実行"]
+    RC --> Y{"復旧コマンドは成功 ?"}
+    Y -- "はい" --> A
+    Y -- "いいえ" --> M{"試行回数 < max-retries ?"}
+    M -- "はい" --> L
+    M -- "いいえ" --> NG
 ```
 
-承認要求は次の状態を持ちます。`pending` のときだけ承認・拒否でき、それ以外に操作すると HTTP 409 を返します。
+注意点:
+
+- 復旧コマンドが成功したら、**失敗したノードをもう一度実行します**。それが成功すれば次のノードへ進みます。
+- 復旧コマンドが失敗した場合は、元の失敗と合わせて新しい復旧コマンドを生成し、`--max-retries` まで再試行します。
+- 停止する条件は「承認が `却下` / `期限切れ` / タイムアウトになった」「承認したコマンドが提案と一致しなかった」「`--max-retries` に達した」です。
+- オーケストレーターは承認 URL(`Approval URL:`)を表示します。承認者にこの URL を渡してください。URL には承認トークンが入っているので、他人に共有しないでください。
+
+### 承認要求の状態
+
+状態名は日本語で保存されます。`承認待ち` のときだけ承認・拒否でき、それ以外に操作すると HTTP 409 を返します。
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: POST / で作成
-    pending --> approved: approve
-    pending --> rejected: reject
-    pending --> expired: APPROVAL_TTL 超過
-    approved --> [*]
-    rejected --> [*]
-    expired --> [*]
+    [*] --> 承認待ち: POST /api/requests
+    承認待ち --> 承認済み: approve
+    承認待ち --> 却下: reject
+    承認待ち --> 期限切れ: APPROVAL_TTL 超過
+    承認済み --> [*]
+    却下 --> [*]
+    期限切れ --> [*]
 ```
 
-停止する条件は次のとおりです。
+期限切れは、`GET` した時、または approve / reject を試みた時に判定されます。
 
-- 復旧コマンドが `rejected` / `expired` / `timeout` になった
-- 復旧コマンドの実行が失敗した
-- `--max-retries` に達した
+### 復旧サーバーの API
 
-## 承認フローと安全設計
+| メソッド | パス | 認証 | 説明 |
+|---|---|---|---|
+| `POST` | `/api/requests` | `X-API-Key` | 承認要求を作成する。body は `{"id", "command", "purpose"}`(すべて空でない文字列)。応答に `approval_url` を含む。不正なら 400、同じ `id` が既にあれば 409 |
+| `GET` | `/api/requests/<id>` | `X-API-Key` または `X-Approval-Token` | `status` と `command` と `purpose` を返す。存在しなければ 404 |
+| `POST` | `/api/requests/<id>/approve` | `X-Approval-Token` | `承認済み` にする |
+| `POST` | `/api/requests/<id>/reject` | `X-Approval-Token` | `却下` にする |
 
-非公開サーバー(`dynamic_orchestrater.py`)は外向きの通信しかできない前提で、公開サーバー(`recovery_server.py`)を中継にして、承認者(PWA)の承認を得てから復旧コマンドを実行します。
+承認 URL は `<APPROVAL_URL>#id=...&token=...&api=<サーバーURL>` の形です。トークンは `#` 以降(フラグメント)にあるので、承認画面のホスト先(GitHub Pages など)には送信されません。承認画面は読み取ったトークンを `X-Approval-Token` ヘッダーで送ります。
 
-```
-非公開サーバー ──(1)履歴をPOST──▶ 公開サーバー ◀──(3)承認/拒否── 承認者(PWA)
-      │  ◀─(4)承認状態をポーリング──     │  ──(2)承認URLを返す──▶ (承認者へURLを共有)
-      └─(5)承認済みなら、内容を検証して実行
-```
-
-非公開サーバーから公開サーバーへの通信だけで完結し、公開サーバーから非公開サーバーへの接続は不要です。
-
-### APIキーの渡し方
-
-`--api-key` は `ps` やシェル履歴にキーが残るため非推奨です。次のいずれかを使います。優先順位は 1 > 2 > 3 です。
-
-1. 環境変数: `export RECOVERY_API_KEY="..."`
-2. キーファイル: `--api-key-file ~/.recovery_key`(先頭1行がキー。`chmod 600` 推奨。権限が緩いと警告)
-3. `--api-key "..."`(警告が出ます)
-
-`--recovery-url` を指定しない場合は復旧機能を使わないので、キーは不要です。
-
-### 鍵と権限の分離
-
-| 鍵 | 持つ人 | できること |
-|---|---|---|
-| APIキー(`RECOVERY_API_KEY`) | 非公開サーバー・公開サーバー | 承認要求の作成、承認結果の取得 |
-| 承認トークン(承認URLの `#token=`) | 承認者(PWA) | その1件の承認要求の確認・承認・拒否のみ |
-
-- PWA は APIキーを持ちません。承認トークンでは結果取得(`/result`)はできず、APIキーでは承認できません。
-- 承認トークンはURLの `#` 以降(フラグメント)に入ります。フラグメントは GitHub Pages 等のサーバーに送信されず、Referer にも載りません。PWA は読み取り後にアドレスバーから消します。
-- キー・トークンの比較は定数時間で行います。
-
-### 承認は「見たコマンド」に束縛される
-
-- PWA は表示したコマンドの SHA-256(`command_hash`)を承認時に送ります。ハッシュが一致しないと承認できません(`hash_mismatch`)。
-- 非公開サーバーは、実行の直前にコマンドとハッシュの整合性を再検証し、一致しなければ実行せずに停止します。
-- 承認済みコマンドは1回しか取得できません(2回目は HTTP 410 `consumed`)。
-- 承認トークンを5回間違えると、その承認要求はロックされます(HTTP 429)。誤トークンを送るだけで承認を妨害できますが、その場合コマンドは実行されない側(安全側)に倒れます。
-
-### 限界(守れないもの)
-
-- **公開サーバー自体が乗っ取られた場合**、攻撃者はコマンドとそのハッシュの両方を差し替えられます。非公開サーバー側で検出することはできません。公開サーバーは信頼できる環境で運用し、APIキーを定期的に更新してください。
-- **承認者の端末が乗っ取られている場合**、承認画面の表示自体を信用できません。
-- `pending_requests` はメモリ上にしかないので、公開サーバーを再起動すると承認待ちの要求は失われます(その場合は非公開サーバー側が承認待ちのタイムアウトで停止します)。
-
-## 終了コード
-
-`static_orchestrater.py` と `dynamic_orchestrater.py` は、シェルスクリプトや CI から呼び出しても成否が判別できるよう、次の終了コードを返します。
-
-| 終了コード | 意味 |
-|---|---|
-| `0` | 最後のノード(または `-e` で指定したノード)まで成功した |
-| `1` | ノードの失敗、復旧の拒否・期限切れ・タイムアウト、リトライ上限、plan の検証エラーなどで止まった |
-| `130` | `^C` で中断した(history は保存される) |
-
-実行前に plan を検証します。`-s` / `-e` に存在しないノード名を指定した場合、「次のノード」が plan にない場合、`実行コマンド` / `目的` がないノードがある場合は、コマンドを実行せずにエラーで終了します。
+- APIキーでは承認・拒否できず、承認トークンはその 1 件の確認・承認・拒否だけに使えます。
+- 認証に失敗すると 401 を返します。キー・トークンの比較は定数時間で行います。
+- オーケストレーターは、承認されたコマンドが自分で提案したコマンドと一致することを実行前に確認します。
 
 ## 出力ファイル
 
-history と log は同じ内容の JSON 配列です。1 コマンドにつき 1 要素で、復旧コマンドも同じ形式で追記されます。
+history と log は同じ内容の JSON 配列で、1 コマンドにつき 1 要素です。**キー名は static と dynamic で異なります。**
+
+static:
 
 ```json
 {
@@ -229,18 +255,52 @@ history と log は同じ内容の JSON 配列です。1 コマンドにつき 1
 }
 ```
 
-`^C` で中断した場合は `終了コード` が `-2` になり、それまでの history も保存されます。
+dynamic(復旧コマンドも同じ形式で追記されます):
+
+```json
+{
+  "node": "nvt",
+  "実行コマンド": "...",
+  "目的": "NVT平衡化を実行する",
+  "returncode": 0,
+  "stdout": "...",
+  "stderr": "..."
+}
+```
+
+- static は停止時(`^C` を含む)に history と log を書き出します。`^C` で中断した場合の `終了コード` は `-2` です。
+- dynamic は、コマンドを 1 つ実行するたびに history と log を上書き保存します。
+
+## 終了コード
+
+| 終了コード | static | dynamic |
+|---|---|---|
+| `0` | 最後のノード(または `-e` のノード)まで成功した | 同左 |
+| `1` | ノードの失敗、plan の検証エラー | 承認が得られなかった、復旧コマンドが上限回数まで失敗した |
+| `130` | `^C` で中断した | 同左 |
+
+static は実行前に plan を検証し、次の場合はコマンドを実行せずにエラーで終了します。
+
+- `-s` / `-e` に存在しないノード名を指定した
+- `次のノード` が plan にないノードを指している
+- `実行コマンド` / `目的` が文字列でないノードがある
+
+dynamic も実行前に同じ検証を行います。さらに `-s` から `-e` まで `次のノード` をたどって到達できない場合(例: `-s b -e a`)もエラーになります。
 
 ## 注意事項
 
-- **コマンドは `shell=True` で実行されます。** plan と、承認した復旧コマンドは、承認者が全文を読んだ上で実行してください。信頼できない plan は実行しないでください。
-- 現在の `recovery_server.py` が返す復旧コマンドは `echo recovery` の固定値です。動作確認用で、実際の復旧処理は行いません。
-- 承認 URL には `api=`(復旧サーバーの公開 URL)が自動で付与され、承認画面はそこへ接続します。`PUBLIC_URL` を設定した場合はその値が使われます。
-- 復旧サーバーは、承認画面のオリジン(既定は `APPROVAL_URL` のオリジン、`CORS_ORIGINS` で変更可)からのブラウザアクセスだけを許可します。
-- 復旧サーバーは、空・不正な形式の history を受け取ると HTTP 400 を返します。
-- `createplan.py` は、入力値に `"` や `\` が含まれていても JSON が壊れないようエスケープして埋め込みます。
-- 履歴はリクエストボディで送信するため、出力が大きくても送信できます(以前の `curl` 引数渡しでは約128KBで失敗していました)。
-- 承認要求はメモリ上に保持されるため、サーバーを再起動すると消えます。
-- `recovery_server.py` は Flask の開発サーバーで動きます。長期運用する場合は gunicorn などを使ってください。
-- 承認 URL にはトークンが含まれます。他人に共有しないでください。
-- `example1.json` の `ref_p = 560` や本番MDの `nsteps = 50000000`(100 ns)は、用途に合わせて確認してください。
+- **コマンドは `shell=True` で実行されます。** plan と、承認した復旧コマンドは、全文を読んだ上で実行してください。信頼できない plan は実行しないでください。
+- **失敗したコマンドと `stderr` が Groq に送信されます。** 秘匿したい情報が含まれていないか確認してください。
+- LLM が生成した復旧コマンドは、承認画面に表示された内容がそのまま実行されます。承認者は全文を読んでください。
+- 承認済みコマンドは、有効期限内なら何度でも `GET` で読み出せます(ワンタイム化はありません)。
+- 承認トークンを間違えてもロックはかかりません。
+- `pending_requests` はメモリ上にあるため、サーバーを再起動すると承認待ちの要求は失われます。
+- `recovery_server.py` は Flask の開発サーバーで動きます。本番運用では gunicorn などを使ってください。
+- `--offline` は HTTP(暗号化なし)で `0.0.0.0` に公開します。信頼できるネットワーク内でだけ使ってください。
+- `example1.json` の `ref_p = 560` や本番MDの `nsteps = 50000000`(`dt = 0.002` で 100 ns)は、用途に合わせて確認してください。
+
+## 既知の問題・未対応のこと
+
+1. **承認画面([recovery_approval-v1](https://github.com/nakamura26002002921-a11y/recovery_approval-v1))との対応は未確認です。** 承認 URL の形式(`#id=...&token=...&api=...`)と、`X-Approval-Token` ヘッダーを送る前提は、承認画面側がこの API に対応している場合のみ動作します。
+2. **コマンドの出力は、終了するまで表示されません。** 出力を `capture_output` で溜めるため、長い `mdrun` の途中経過は見えません。
+3. **`{PATH}` などは `createplan.py` でクオートせずに埋め込まれます。** 空白を含むパスは、シェルで正しく扱えません。
