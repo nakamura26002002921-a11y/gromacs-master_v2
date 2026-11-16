@@ -1,0 +1,200 @@
+
+# dynamic_orchestrater_offline.py
+# ============================================================
+# Usage:
+#   python3 dynamic_orchestrater_offline.py -p plan.json --api-key "gsk_..." --server-ip 192.168.1.100 --port 5000
+#   python3 dynamic_orchestrater_offline.py -p plan.json --api-key "gsk_..." --server-ip 192.168.1.100 --port 5000 -s nvt -e npt_pr -ep /path/to/workdir
+# ============================================================
+
+import argparse
+import json
+import requests
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from groq import Groq
+
+
+SYSTEM_PROMPT = """
+Purpose:
+A command failed. Write a command to recover from the error.
+
+- command: The command to execute
+- purpose: Why this command is necessary
+
+All fields must strictly follow the specified JSON Schema types.
+Output JSON only. Do not output any other text.
+"""
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "command": {"type": "string"},
+        "purpose": {"type": "string"}
+    },
+    "required": ["command", "purpose"],
+    "additionalProperties": False
+}
+
+
+def call_llm(history, api_key):
+    client = Groq(api_key=api_key)
+    failed = history[-1]
+    context = {
+        "実行コマンド": failed["実行コマンド"],
+        "目的": failed["目的"],
+        "returncode": failed["returncode"],
+        "stderr": failed["stderr"]
+    }
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)}
+        ],
+        temperature=0,
+        max_tokens=2000,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "recovery_command",
+                "strict": True,
+                "schema": SCHEMA
+            }
+        }
+    )
+    return json.loads(response.choices[0].message.content)
+
+
+def create_approval_request(server_url, request_id, command, purpose):
+    response = requests.post(f"{server_url}/api/requests", json={"id": request_id, "purpose": purpose, "command": command}, timeout=10)
+    return response.json()
+
+
+def get_approval_request(server_url, request_id):
+    response = requests.get(f"{server_url}/api/requests/{request_id}", timeout=10)
+    return response.json()
+
+
+def wait_for_approval(server_url, request_id, timeout, interval):
+    started = time.time()
+    while True:
+        data = get_approval_request(server_url, request_id)
+        if data["status"] == "承認済み":
+            return data
+        if data["status"] == "却下":
+            return None
+        if time.time() - started >= timeout:
+            return None
+        print(f"Waiting for approval: {request_id} ({int(time.time() - started)} seconds elapsed)")
+        time.sleep(interval)
+
+
+def run(node, cmd, cwd):
+    print(f"[{node}] Executing: {cmd['実行コマンド']}")
+    result = subprocess.run(cmd["実行コマンド"], shell=True, cwd=cwd, capture_output=True, text=True)
+    return {
+        "node": node,
+        "実行コマンド": cmd["実行コマンド"],
+        "目的": cmd["目的"],
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr
+    }
+
+
+def save_history(history, history_path, log_path):
+    data = json.dumps(history, ensure_ascii=False, indent=2)
+    history_path.write_text(data, encoding="utf-8")
+    log_path.write_text(data, encoding="utf-8")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("-p", "--plan", required=True)
+    p.add_argument("--api-key", required=True)
+    p.add_argument("--server-ip", required=True)
+    p.add_argument("--port", type=int, default=5000)
+    p.add_argument("--history")
+    p.add_argument("-l", "--logpath")
+    p.add_argument("-s", "--start")
+    p.add_argument("-e", "--end")
+    p.add_argument("-ep", "--executionpath", default=".")
+    p.add_argument("--max-retries", type=int, default=3)
+    p.add_argument("--approval-timeout", type=int, default=3600)
+    p.add_argument("--approval-interval", type=int, default=5)
+    a = p.parse_args()
+
+    server_url = f"http://{a.server_ip}:{a.port}"
+    print(f"Approval server: {server_url}")
+
+    plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))
+    now = datetime.now().strftime("%Y%m%d_%H%M%S")
+    history_path = Path(a.history) if a.history else Path(f"histories/{Path(a.plan).stem}_{now}.json")
+    log_path = Path(a.logpath) if a.logpath else Path(f"logs/{Path(a.plan).stem}_{now}.json")
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    history = []
+    start = a.start or next(iter(plan))
+    end = a.end or list(plan)[-1]
+    node = start
+
+    while True:
+        result = run(node, plan[node], a.executionpath)
+        history.append(result)
+        save_history(history, history_path, log_path)
+
+        if result["returncode"] == 0:
+            if node == end:
+                return 0
+            node = plan[node]["次のノード"]
+            continue
+
+        recovered = False
+
+        for retry in range(a.max_retries):
+            recovery_command = call_llm(history, a.api_key)
+            request_id = f"{Path(a.plan).stem}_{node}_{uuid.uuid4().hex[:8]}"
+
+            print(f"Sending approval request: {request_id}")
+            create_approval_request(server_url, request_id, recovery_command["command"], recovery_command["purpose"])
+            print("Waiting for LAN approval...")
+
+            approved = wait_for_approval(server_url, request_id, a.approval_timeout, a.approval_interval)
+
+            if approved is None:
+                print("Approval was not received or was rejected.")
+                return 1
+
+            recovery_command = {
+                "実行コマンド": approved["command"],
+                "目的": approved["purpose"]
+            }
+
+            print("Approval confirmed. Executing recovery command.")
+            recovery_result = run(node, recovery_command, a.executionpath)
+            history.append(recovery_result)
+            save_history(history, history_path, log_path)
+
+            if recovery_result["returncode"] == 0:
+                recovered = True
+                break
+
+        if not recovered:
+            return 1
+
+        if node == end:
+            return 0
+
+        node = plan[node]["次のノード"]
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("Interrupted.")
+        sys.exit(130)
