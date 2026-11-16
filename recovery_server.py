@@ -14,13 +14,15 @@
 #   4. (任意) CORS許可オリジンを設定
 #      export CORS_ORIGINS="https://YOUR-USER.github.io"
 #
-#   5. LAN公開で起動
+#   5. LAN公開で起動（デフォルト5000番）
 #      python3 recovery_server.py --offline
 #
-#   6. 通常起動
+#   6. LAN公開でポートを指定
+#      python3 recovery_server.py --offline --offline-port 5000
+#
+#   7. 通常起動
 #      python3 recovery_server.py
 # ============================================================
-
 import argparse
 import hmac
 import os
@@ -33,6 +35,7 @@ from flask_cors import CORS
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--offline", action="store_true")
+parser.add_argument("--offline-port", type=int, default=5000)
 args = parser.parse_args()
 
 def require_env(name):
@@ -93,7 +96,6 @@ def create_approval():
     print(f"[Approval] New request: {request_id}")
     return jsonify({"status": "承認待ち", "id": request_id})
 
-
 @app.route("/api/requests/<request_id>", methods=["GET"])
 def get_approval(request_id):
     if not check_api_key():
@@ -104,7 +106,6 @@ def get_approval(request_id):
     if item["status"] == "承認待ち" and is_expired(item):
         item["status"] = "期限切れ"
     return jsonify({"status": item["status"], "command": item["command"], "purpose": item["purpose"]})
-
 
 def update_status(request_id, status):
     item = pending_requests.get(request_id)
@@ -130,5 +131,7 @@ def reject(request_id):
 if __name__ == "__main__":
     host = "0.0.0.0" if args.offline else "127.0.0.1"
     address = get_local_ip() if args.offline else "127.0.0.1"
-    print(f"Approval Server: http://{address}:5000")
-    app.run(host=host, port=5000)
+    print(f"Approval Server: http://{address}:{args.offline_port}")
+    print(f"Binding Address: {host}:{args.offline_port}")
+    print(f"Approval TTL: {APPROVAL_TTL} seconds")
+    app.run(host=host, port=args.offline_port)
