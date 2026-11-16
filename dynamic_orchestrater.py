@@ -113,7 +113,7 @@ def request_recovery(a, server_url, node, history, request_id):
     proposal = call_llm(history, a.api_key)
     created = create_approval_request(server_url, request_id, proposal["command"], proposal["purpose"], a.recovery_api_key)
     print(f"Recovery command is waiting for approval: {request_id}")
-    print(f"Approval URL: {created['approval_url']}")
+    print(f"Approval URL: {rewrite_approval_api(created['approval_url'], a.approval_api)}")
     approved = wait_for_approval(server_url, request_id, a.recovery_api_key, a.approval_timeout, a.approval_interval)
     if approved is None:
         print("Approval was not received.")
