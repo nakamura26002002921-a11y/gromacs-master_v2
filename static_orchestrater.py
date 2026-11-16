@@ -1,3 +1,4 @@
+# static_orchestrater.py
 # ============================================================
 # Usage:
 #   python3 static_orchestrater.py -p plan.json
@@ -29,6 +30,21 @@ def validate_plan(plan, start, end):
     for label, value in (("--start", start), ("--end", end)):
         if value is not None and value not in plan:
             raise SystemExit(f"{label} のノード '{value}' は plan に存在しません。使えるノード: {', '.join(plan)}")
+    first = start or next(iter(plan))
+    goal = end or list(plan)[-1]
+    node = first
+    visited = set()
+    while node != goal:
+        visited.add(node)
+        node = plan[node].get("次のノード")
+        if node is None or node in visited:
+            raise SystemExit(f"開始ノード '{first}' から終了ノード '{goal}' に到達できません")
+
+
+def save_history(history, history_path, log_path):
+    data = json.dumps(history, ensure_ascii=False, indent=2)
+    history_path.write_text(data, encoding="utf-8")
+    log_path.write_text(data, encoding="utf-8")
 
 
 def main():
@@ -41,7 +57,7 @@ def main():
     p.add_argument("-ep", "--executionpath")
     a = p.parse_args()
     plan_path = Path(a.plan)
-    plan = json.load(open(plan_path, encoding="utf-8"))
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
     name = plan_path.stem
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     history_path = Path(a.history or f"histories/{name}_{now}.json")
@@ -73,9 +89,9 @@ def main():
                 break
             node = n["次のノード"]
     finally:
-        json.dump(history, open(history_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-        json.dump(history, open(log_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        save_history(history, history_path, log_path)
     return succeeded
+
 
 if __name__ == "__main__":
     # 最後まで(または -e のノードまで)成功したら 0、失敗して止まったら 1 を返す。^C は 130
