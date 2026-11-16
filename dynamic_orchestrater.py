@@ -100,10 +100,6 @@ def run(node, cmd, cwd):
 
 
 def rewrite_approval_api(approval_url, approval_api):
-    """承認 URL の #...&api=... の値だけを approval_api に差し替える。
-
-    approval_api が空なら何もしない。トークンなど他のパラメータは変更しない。
-    """
     if not approval_api:
         return approval_url
     parts = urlsplit(approval_url)
